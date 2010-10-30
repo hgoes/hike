@@ -3,6 +3,8 @@ module Language.Pike.Syntax where
 data Definition = Definition [Modifier] DefinitionBody
                 deriving Show
 
+data Signature = Sig Type [(String,Type)] deriving Show
+
 data DefinitionBody
     = Import (Either ConstantIdentifier String)
     | FunctionDef String Type [(String,Type)] [Statement]
@@ -29,26 +31,32 @@ data Type = TypeInt
           | TypeVoid
           | TypeId ConstantIdentifier
           | TypeArray Type
-          deriving Show
+          | TypeBool
+          | TypeFunction Type [Type]
+          deriving (Show,Eq)
 
 data ConstantIdentifier = ConstId Bool [String]
-                        deriving Show
+                        deriving (Show,Eq)
 
 data Statement
-    = StmtExpr Expression
+    = StmtBlock [Statement]
+    | StmtExpr Expression
     | StmtDecl String Type (Maybe Expression)
-    | StmtIf Expression [Statement] (Maybe [Statement])
+    | StmtIf Expression Statement (Maybe Statement)
     | StmtReturn (Maybe Expression)
+    | StmtFor (Maybe Expression) (Maybe Expression) (Maybe Expression) [Statement]
+    | StmtBreak
     deriving Show
 
 data Expression
     = ExprId ConstantIdentifier
     | ExprAssign AssignType ConstantIdentifier Expression
-    | ExprCall String [Expression]
+    | ExprCall Expression [Expression]
     | ExprString String
     | ExprInt Integer
     | ExprBin BinOp Expression Expression
     | ExprIndex Expression Expression
+    | ExprLambda [(String,Type)] Statement
     deriving Show
 
 data AssignType
@@ -60,4 +68,5 @@ data BinOp
     = BinPlus
     | BinEqual
     | BinAccess
+    | BinLess
     deriving Show
