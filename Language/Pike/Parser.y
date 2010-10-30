@@ -21,6 +21,7 @@ import Control.Monad.Error
   const_int                  { ConstInt $$ }
   "array"                    { Key KeyArray }
   "break"                    { Key KeyBreak }
+  "class"                    { Key KeyClass }
   "else"                     { Key KeyElse }
   "for"                      { Key KeyFor }
   "if"                       { Key KeyIf }
@@ -67,8 +68,9 @@ Modifiers : Modifier Modifiers { $1:$2 }
 
 Modifier : "public" { Public }
 
-DefinitionBody : "import" ConstantIdentifier ";"         { Import $ Left $2 }
-               | Type identifier "(" Arguments ")" Block { FunctionDef $2 $1 $4 $6 }
+DefinitionBody : "import" ConstantIdentifier ";"                     { Import $ Left $2 }
+               | Type identifier "(" Arguments ")" Block             { FunctionDef $2 $1 $4 $6 }
+               | "class" identifier ArgumentsOpt "{" Definitions "}" { ClassDef $2 $3 $5 }
 
 ConstantIdentifier : "." identifier ConstantIdentifierN { ConstId True ($2:$3) }
                    | identifier ConstantIdentifierN     { ConstId False ($1:$2) }
@@ -87,6 +89,9 @@ Arguments : Type identifier ArgumentsN { ($2,$1):$3 }
 
 ArgumentsN : "," Type identifier ArgumentsN { ($3,$2):$4 }
            |                                { [] }
+
+ArgumentsOpt : "(" Arguments ")" { $2 }
+             |                   { [] }
 
 Block : "{" Statements "}" { $2 }
 

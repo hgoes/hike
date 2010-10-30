@@ -33,6 +33,7 @@ instance Show Token where
 
 data Keyword = KeyArray
              | KeyBreak
+             | KeyClass
              | KeyElse
              | KeyFor
              | KeyIf
