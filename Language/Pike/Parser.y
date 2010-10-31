@@ -20,6 +20,7 @@ import Control.Monad.Error
   const_string               { ConstString $$ }
   const_int                  { ConstInt $$ }
   "array"                    { Key KeyArray }
+  "bool"                     { Key KeyBool }
   "break"                    { Key KeyBreak }
   "class"                    { Key KeyClass }
   "else"                     { Key KeyElse }
@@ -85,6 +86,7 @@ IdentifiersN : "," identifier IdentifiersN { $2:$3 }
 Type : "string"             { TypeString } 
      | "void"               { TypeVoid }
      | "int"                { TypeInt }
+     | "bool"               { TypeBool }
      | ConstantIdentifier   { TypeId $1 }
      | "array" "(" Type ")" { TypeArray $3 }
 

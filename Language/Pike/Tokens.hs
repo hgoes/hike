@@ -32,6 +32,7 @@ instance Show Token where
     
 
 data Keyword = KeyArray
+             | KeyBool
              | KeyBreak
              | KeyClass
              | KeyElse
