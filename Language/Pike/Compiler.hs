@@ -15,50 +15,45 @@ import Data.List (find)
 
 type Compiler a = ErrorT CompileError (StateT ([Unique],Stack) (Writer [LlvmFunction])) a
 
-data StackReference = Pointer Type BS.ByteString
-                    | Variable Type BS.ByteString
-                    | Function Type [Type] BS.ByteString
-                    | Class [StackReference] BS.ByteString
+data StackReference = Pointer Type
+                    | Variable Type
+                    | Function Type [Type]
+                    | Class [(BS.ByteString,StackReference)]
                     deriving Show
 
-type Stack = [[StackReference]]
+type Stack = [[(BS.ByteString,StackReference)]]
 
-initialStack :: [Definition] -> [StackReference]
+initialStack :: [Definition] -> [(BS.ByteString,StackReference)]
 initialStack [] = []
 initialStack ((Definition _ body):xs)
     = case body of
-        FunctionDef name tp args _ -> (Function tp [t | (_,t) <- args] (BS.pack name)):rest
-        ClassDef name args defs -> (Class (initialStack defs) (BS.pack name)):rest
-        VariableDef tp names -> [ Variable tp (BS.pack name) | name <- names ] ++ rest
+        FunctionDef name tp args _ -> (BS.pack name,Function tp [t | (_,t) <- args]):rest
+        ClassDef name args defs -> (BS.pack name,Class (initialStack defs)):rest
+        VariableDef tp names -> [ (BS.pack name,Variable tp) | name <- names ] ++ rest
         _ -> rest
     where
       rest = initialStack xs
                         
 
 stackAlloc' :: String -> Type -> Stack -> Stack
-stackAlloc' name tp []     = [[Pointer tp (BS.pack name)]]
-stackAlloc' name tp (x:xs) = ((Pointer tp (BS.pack name)):x):xs
+stackAlloc' name tp []     = [[(BS.pack name,Pointer tp)]]
+stackAlloc' name tp (x:xs) = ((BS.pack name,Pointer tp):x):xs
 
 stackAlloc :: String -> Type -> Compiler ()
 stackAlloc name tp = modify $ \(uniq,st) -> (uniq,stackAlloc' name tp st)
 
-stackLookup' :: ConstantIdentifier -> Stack -> StackReference
+stackLookup' :: ConstantIdentifier -> Stack -> (BS.ByteString,StackReference)
 stackLookup' s [] = error $ "Couldn't lookup "++show s
-stackLookup' s@(ConstId _ (name:_)) (x:xs) = case find (\ref -> case ref of
-                                                                 Pointer _ n -> n == BS.pack name
-                                                                 Variable _ n -> n == BS.pack name
-                                                                 Function _ _ n -> n == BS.pack name
-                                                                 Class _ n -> n == BS.pack name
-                                                       ) x of
-                                               Nothing -> stackLookup' s xs
-                                               Just ref -> ref
+stackLookup' s@(ConstId _ (name:_)) (x:xs) = case find (\(n,_) -> n == (BS.pack name)) x of
+  Nothing -> stackLookup' s xs
+  Just ref -> ref
 
-stackLookup :: ConstantIdentifier -> Compiler StackReference
+stackLookup :: ConstantIdentifier -> Compiler (BS.ByteString,StackReference)
 stackLookup s = do
   (_,st) <- get
   return $ stackLookup' s st
 
-stackAdd :: [StackReference] -> Compiler ()
+stackAdd :: [(BS.ByteString,StackReference)] -> Compiler ()
 stackAdd refs = modify $ \(uniq,st) -> (uniq,refs:st)
 
 stackPush :: Compiler ()
@@ -126,7 +121,7 @@ compileFunction :: String -> Type -> [(String,Type)] -> [Statement] -> Compiler 
 compileFunction name ret args block = do
                                         decl <- genFuncDecl (BS.pack name) ret (map snd args)
                                         stackPush
-                                        stackAdd [Variable argtp (BS.pack argn) | (argn,argtp) <- args]
+                                        stackAdd [(BS.pack argn,Variable argtp) | (argn,argtp) <- args]
                                         blks <- compileBody block ret
                                         stackPop
                                         return $ LlvmFunction
@@ -271,27 +266,27 @@ compileExpression (ExprInt n) tp = case tp of
     TypeFloat -> return ([],LMLitVar $ LMFloatLit (fromIntegral n) LMDouble,TypeFloat)
     _ -> error $ "Ints can't have type "++show rtp
 compileExpression e@(ExprId name) etp = do
-  ref <- stackLookup name
+  (n,ref) <- stackLookup name
   case ref of
-    Variable tp n -> do
+    Variable tp -> do
       typeCheck e etp tp
       rtp <- toLLVMType tp
       return ([],LMNLocalVar n rtp,tp)
-    Pointer tp n -> do
+    Pointer tp -> do
       typeCheck e etp tp
       rtp <- toLLVMType tp
       lbl <- newLabel
       let tvar = LMLocalVar lbl rtp
       return ([Assignment tvar (Load (LMNLocalVar n (LMPointer rtp)))],tvar,tp)
-    Function tp args n -> do
+    Function tp args -> do
       typeCheck e etp (TypeFunction tp args)
       fdecl <- genFuncDecl n tp args
       return ([],LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False,TypeFunction tp args)
 compileExpression e@(ExprAssign Assign tid expr) etp = do
-  ref <- stackLookup tid
+  (n,ref) <- stackLookup tid
   case ref of
-    Variable tp n -> error "Please don't assign to function arguments yet..."
-    Pointer ptp n -> do
+    Variable tp -> error "Please don't assign to function arguments yet..."
+    Pointer ptp -> do
       typeCheck e etp ptp
       (extra,res,_) <- compileExpression expr (Just ptp)
       llvmtp <- toLLVMType ptp
@@ -329,7 +324,7 @@ compileExpression e@(ExprLambda args body) etp = do
         Just (TypeFunction r _) -> Just r
         _ -> Nothing
   (blks,nrtp) <- stackShadow $ do
-    stackAdd [ Variable tp (BS.pack name) | (name,tp) <- args ]
+    stackAdd [ (BS.pack name,Variable tp) | (name,tp) <- args ]
     (stmts,blks,rtp2) <- compileStatement body Nothing rtp
     nblks <- appendStatements stmts blks
     return (nblks,rtp2)
@@ -352,12 +347,12 @@ toLLVMType :: Type -> Compiler LlvmType
 toLLVMType TypeInt = return (LMInt 32)
 toLLVMType TypeBool = return (LMInt 1)
 toLLVMType (TypeId name) = do
-  ref <- stackLookup name
+  (n,ref) <- stackLookup name
   case ref of
-    Class st _ -> stackShadow $ do
+    Class st -> stackShadow $ do
       stackAdd st
-      res <- mapMaybeM (\sref -> case sref of
-                           Variable tp _ -> toLLVMType tp >>= return.Just
+      res <- mapMaybeM (\(n,sref) -> case sref of
+                           Variable tp -> toLLVMType tp >>= return.Just
                            _ -> return Nothing) st
       stackPop
       return (LMStruct res)
