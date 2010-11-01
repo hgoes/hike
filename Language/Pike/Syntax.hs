@@ -3,8 +3,6 @@ module Language.Pike.Syntax where
 data Definition = Definition [Modifier] DefinitionBody
                 deriving Show
 
-data Signature = Sig Type [(String,Type)] deriving Show
-
 data DefinitionBody
     = Import (Either ConstantIdentifier String)
     | FunctionDef String Type [(String,Type)] [Statement]
