@@ -7,13 +7,12 @@ import Llvm
 import qualified Data.ByteString.Char8 as BS
 import Data.Maybe (mapMaybe,catMaybes)
 import System.IO.Unsafe (unsafeInterleaveIO)
-import Data.Unique
 import Control.Monad.State
 import Control.Monad.Writer
 import Control.Monad.Error
 import Data.List (find)
 
-type Compiler a = ErrorT CompileError (StateT ([Unique],Stack) (Writer [LlvmFunction])) a
+type Compiler a = ErrorT CompileError (StateT ([Integer],Stack) (Writer [LlvmFunction])) a
 
 data StackReference = Pointer Type
                     | Variable Type
@@ -71,22 +70,14 @@ stackShadow comp = do
   put (nuniq,st)
   return res
 
-newLabel :: Compiler Unique
+newLabel :: Compiler Integer
 newLabel = do
   (x:xs,st) <- get
   put (xs,st)
   return x
 
-uniques :: IO [Unique]
-uniques = do
-  x <- newUnique
-  xs <- unsafeInterleaveIO uniques
-  return $ x:xs
-
-runCompiler :: Compiler a -> IO (Either CompileError a)
-runCompiler c = do
-  uniq <- uniques
-  return $ fst $ runWriter $ evalStateT (runErrorT c) (uniq,[])
+runCompiler :: Compiler a -> Either CompileError a
+runCompiler c = fst $ runWriter $ evalStateT (runErrorT c) ([0..],[])
 
 mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
 mapMaybeM f xs = mapM f xs >>= return.catMaybes
@@ -161,14 +152,14 @@ appendStatements stmts [] = do
                     }]
 appendStatements stmts (x:xs) = return $ x { blockStmts = stmts ++ (blockStmts x) }:xs
 
-compileStatements :: [Statement] -> [LlvmBlock] -> Maybe Unique -> Maybe Type -> Compiler ([LlvmBlock],Maybe Type)
+compileStatements :: [Statement] -> [LlvmBlock] -> Maybe Integer -> Maybe Type -> Compiler ([LlvmBlock],Maybe Type)
 compileStatements [] blks _ rtp = return (blks,rtp)
 compileStatements (x:xs) blks brk rtp = do
   (stmts,nblks,nrtp) <- compileStatement x brk rtp
   nblks2 <- appendStatements stmts blks
   compileStatements xs (nblks ++ nblks2) brk nrtp
 
-compileStatement :: Statement -> Maybe Unique -> Maybe Type -> Compiler ([LlvmStatement],[LlvmBlock],Maybe Type)
+compileStatement :: Statement -> Maybe Integer -> Maybe Type -> Compiler ([LlvmStatement],[LlvmBlock],Maybe Type)
 compileStatement (StmtBlock stmts) brk rtp = do
   stackPush
   (blks,nrtp) <- compileStatements stmts [] brk rtp
@@ -318,7 +309,7 @@ compileExpression e@(ExprCall expr args) etp = do
     _ -> throwError (NotAFunction e ftp)
 compileExpression e@(ExprLambda args body) etp = do
   fid <- newLabel
-  let fname = BS.pack ("lambda"++show (hashUnique fid))
+  let fname = BS.pack ("lambda"++show fid)
   fdecl <- genFuncDecl fname TypeInt (map snd args)
   let rtp = case etp of
         Just (TypeFunction r _) -> Just r
