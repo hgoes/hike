@@ -5,7 +5,7 @@ Cabal-Version:  >=1.2
 Build-Type:     Simple
 
 Library
-  Build-Depends:        base,array,mtl,pretty,bytestring
+  Build-Depends:        base>=4,array,mtl,pretty,bytestring,containers
   Exposed-Modules:
     Language.Pike.Tokens
     Language.Pike.Lexer
