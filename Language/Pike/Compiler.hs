@@ -24,11 +24,11 @@ data StackReference = Pointer RType
                     | Class Integer
                     deriving Show
 
-type Stack = [[(BS.ByteString,StackReference)]]
+type Stack = [Map String (BS.ByteString,StackReference)]
 
-type ClassMap = Map Integer (BS.ByteString,[(BS.ByteString,StackReference)])
+type ClassMap = Map Integer (BS.ByteString,Map String (BS.ByteString,StackReference))
 
-resolve :: [Definition] -> Either [CompileError] ([(BS.ByteString,StackReference)],ClassMap)
+resolve :: [Definition] -> Either [CompileError] (Map String (BS.ByteString,StackReference),ClassMap)
 resolve defs = let ((res,errs),(_,mp)) = runReader (runStateT (runWriterT (resolveBody defs)) ([0..],Map.empty)) []
                in case errs of
                  [] -> Right (res,mp)
@@ -55,39 +55,39 @@ translateType (TypeId name) = do
 translateType x = return $ fmap (const undefined) x
     
 
-resolveDef :: Definition -> Resolver [(BS.ByteString,StackReference)]
+resolveDef :: Definition -> Resolver (Map String (BS.ByteString,StackReference))
 resolveDef (Definition _ body) = case body of
   VariableDef tp names -> do
     rtp <- resolveType tp
-    return $ map (\name -> (BS.pack name,Variable rtp)) names
+    return $ Map.fromList $ map (\name -> (name,(BS.pack name,Variable rtp))) names
   ClassDef name args body -> do
     rec { rbody <- local (rbody:) $ resolveBody body }
     (uniq,mp) <- get
     put (tail uniq,Map.insert (head uniq) (BS.pack name,rbody) mp)
-    return [(BS.pack name,Class (head uniq))]
+    return $ Map.singleton name (BS.pack name,Class (head uniq))
   FunctionDef name rtp args body -> do
     rtp' <- resolveType rtp
     targs <- mapM (\(_,tp) -> resolveType tp) args
-    return [(BS.pack name,Function rtp' targs)]
-  Import _ -> return []
+    return $ Map.singleton name (BS.pack name,Function rtp' targs)
+  Import _ -> return Map.empty
 
-resolveBody :: [Definition] -> Resolver [(BS.ByteString,StackReference)]
-resolveBody [] = return []
+resolveBody :: [Definition] -> Resolver (Map String (BS.ByteString,StackReference))
+resolveBody [] = return Map.empty
 resolveBody (def:defs) = do
   refs1 <- resolveDef def
   refs2 <- resolveBody defs
-  return (refs1++refs2)
+  return (Map.union refs1 refs2)
 
 stackAlloc' :: String -> RType -> Stack -> Stack
-stackAlloc' name tp []     = [[(BS.pack name,Pointer tp)]]
-stackAlloc' name tp (x:xs) = ((BS.pack name,Pointer tp):x):xs
+stackAlloc' name tp []     = [Map.singleton name (BS.pack name,Pointer tp)]
+stackAlloc' name tp (x:xs) = (Map.insert name (BS.pack name,Pointer tp) x):xs
 
 stackAlloc :: String -> RType -> Compiler ()
 stackAlloc name tp = modify $ \(uniq,st) -> (uniq,stackAlloc' name tp st)
 
 stackLookup' :: ConstantIdentifier -> Stack -> Maybe (BS.ByteString,StackReference)
 stackLookup' s [] = Nothing
-stackLookup' s@(ConstId _ (name:_)) (x:xs) = case find (\(n,_) -> n == (BS.pack name)) x of
+stackLookup' s@(ConstId _ (name:_)) (x:xs) = case Map.lookup name x of
   Nothing -> stackLookup' s xs
   Just ref -> Just ref
 
@@ -98,11 +98,11 @@ stackLookup s = do
     Nothing -> error $ "Couldn't lookup "++show s
     Just res -> return res
 
-stackAdd :: [(BS.ByteString,StackReference)] -> Compiler ()
+stackAdd :: Map String (BS.ByteString,StackReference) -> Compiler ()
 stackAdd refs = modify $ \(uniq,st) -> (uniq,refs:st)
 
 stackPush :: Compiler ()
-stackPush = modify $ \(uniq,st) -> (uniq,[]:st)
+stackPush = modify $ \(uniq,st) -> (uniq,Map.empty:st)
 
 stackPop :: Compiler ()
 stackPop = modify $ \(uniq,st) -> (uniq,tail st)
@@ -160,12 +160,12 @@ generateAliases :: Compiler [LlvmAlias]
 generateAliases = do
   mp <- ask
   mapM (\(_,(name,body)) -> do
-           struct <- mapMaybeM (\(name,ref) -> case ref of
+           struct <- mapMaybeM (\(_,(name,ref)) -> case ref of
                                    Variable tp -> do
                                      rtp <- toLLVMType tp
                                      return $ Just rtp
                                    _ -> return Nothing
-                               ) body
+                               ) (Map.toList body)
            return (name,LMStruct struct)
        ) (Map.toList mp)
 
@@ -176,7 +176,7 @@ compileFunction name ret args block = do
                     rtp <- translateType tp
                     return (name,rtp)) args
   decl <- genFuncDecl (BS.pack name) ret_tp (map snd rargs)
-  stackAdd [(BS.pack argn,Variable argtp) | (argn,argtp) <- rargs]
+  stackAdd $ Map.fromList [(argn,(BS.pack argn,Variable argtp)) | (argn,argtp) <- rargs]
   blks <- compileBody block ret_tp
   stackPop
   return $ LlvmFunction { funcDecl = decl
@@ -382,7 +382,7 @@ compileExpression e@(ExprLambda args body) etp = do
         Just (TypeFunction r _) -> Just r
         _ -> Nothing
   (blks,nrtp) <- stackShadow $ do
-    stackAdd [ (BS.pack name,Variable tp) | (name,tp) <- rargs ]
+    stackAdd $ Map.fromList [ (name,(BS.pack name,Variable tp)) | (name,tp) <- rargs ]
     (stmts,blks,rtp2) <- compileStatement body Nothing rtp
     nblks <- appendStatements stmts blks
     return (nblks,rtp2)
@@ -408,20 +408,3 @@ toLLVMType TypeBool = return $ LMInt 1
 toLLVMType (TypeId n) = do
   cls <- ask
   return (LMAlias $ fst $ cls!n)
-
-{-
-toLLVMType :: Type -> Compiler LlvmType
-toLLVMType TypeInt = return (LMInt 32)
-toLLVMType TypeBool = return (LMInt 1)
-toLLVMType (TypeId name) = do
-  (n,ref) <- stackLookup name
-  case ref of
-    Class st -> stackShadow $ do
-      stackAdd st
-      res <- mapMaybeM (\(n,sref) -> case sref of
-                           Variable tp -> toLLVMType tp >>= return.Just
-                           _ -> return Nothing) st
-      stackPop
-      return (LMStruct res)
-    _ -> error $ show name ++ " is not a class"
-toLLVMType t = error $ show t ++ " has no LLVM representation" -}
