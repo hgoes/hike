@@ -45,6 +45,7 @@ data Keyword = KeyArray
              | KeyReturn
              | KeyString
              | KeyVoid
+             | KeyWhile
              deriving Show
 
 data BracketType

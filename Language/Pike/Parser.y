@@ -33,6 +33,7 @@ import Control.Monad.Error
   "return"                   { Key KeyReturn }
   "string"                   { Key KeyString }
   "void"                     { Key KeyVoid }
+  "while"                    { Key KeyWhile }
   "."                        { Dot }
   ":"                        { Colon }
   ";"                        { Semicolon }
@@ -119,6 +120,7 @@ Statement1 : "{" Statements "}"                                                 
            | "if" "(" Expression ")" Statement1 "else" Statement1                  { StmtIf $3 $5 (Just $7) }
            | "return" ExpressionE ";"                                              { StmtReturn (Just $2) }
            | "return" ";"                                                          { StmtReturn Nothing }
+           | "while" "(" Expression ")" Block                                      { StmtWhile $3 $5 }
            | "for" "(" ExpressionOpt ";" ExpressionOpt ";" ExpressionOpt ")" Block { StmtFor $3 $5 $7 $9 }
            | "break" ";"                                                           { StmtBreak }
 
