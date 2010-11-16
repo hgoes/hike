@@ -13,16 +13,19 @@ import Control.Monad.Error
 import Control.Monad.Reader
 import Data.List (find)
 import Data.Map as Map hiding (map,mapMaybe)
+import qualified Data.Map as Map (mapMaybe,map)
+import Data.Set as Set hiding (map)
+import qualified Data.Set as Set
 
 type Compiler a = ErrorT [CompileError] (StateT ([Integer],Stack) (WriterT [LlvmFunction] (Reader ClassMap))) a
 
 type Resolver a = WriterT [CompileError] (StateT ([Integer],ClassMap) (Reader Stack)) a
 
 data StackReference = Pointer RType
-                    | Variable RType
+                    | Variable RType LlvmVar
                     | Function RType [RType]
                     | Class Integer
-                    deriving Show
+                    deriving (Show,Eq)
 
 type Stack = [Map String (BS.ByteString,StackReference)]
 
@@ -59,7 +62,7 @@ resolveDef :: Definition -> Resolver (Map String (BS.ByteString,StackReference))
 resolveDef (Definition _ body) = case body of
   VariableDef tp names -> do
     rtp <- resolveType tp
-    return $ Map.fromList $ map (\name -> (name,(BS.pack name,Variable rtp))) names
+    return $ Map.fromList $ map (\name -> (name,(BS.pack name,Pointer rtp))) names
   ClassDef name args body -> do
     rec { rbody <- local (rbody:) $ resolveBody body }
     (uniq,mp) <- get
@@ -116,6 +119,32 @@ stackShadow comp = do
   put (nuniq,st)
   return res
 
+stackPut :: String -> StackReference -> Compiler ()
+stackPut name ref = do
+  (uniq,st) <- get
+  let nst = case st of
+        [] -> [Map.singleton name (BS.pack (name++show (head uniq)),ref)]
+        x:xs -> (Map.insert name (BS.pack (name++show (head uniq)),ref) x):xs
+  put (tail uniq,nst)
+
+stackDiff :: Stack -> Stack -> [Map String (StackReference,StackReference)]
+stackDiff st1 st2 = reverse $ stackDiff' (reverse st1) (reverse st2)
+  where
+    stackDiff' :: Stack -> Stack -> [Map String (StackReference,StackReference)]
+    stackDiff' (x:xs) (y:ys) = (Map.mapMaybe id $ 
+                                Map.intersectionWith (\(_,l) (_,r) -> if l==r
+                                                                      then Nothing
+                                                                      else Just (l,r)) x y):(stackDiff' xs ys)
+    stackDiff' [] ys = []
+    stackDiff' xs [] = []
+
+{-stackDiff :: Compiler a -> Compiler (a,[Map String (StackReference,StackReference)])
+stackDiff comp = do
+  (_,st1) <- get
+  res <- comp
+  (_,st2) <- get
+  return (res,reverse $ stackDiff' (reverse st1) (reverse st2))-}
+
 newLabel :: Compiler Integer
 newLabel = do
   (x:xs,st) <- get
@@ -161,7 +190,7 @@ generateAliases = do
   mp <- ask
   mapM (\(_,(name,body)) -> do
            struct <- mapMaybeM (\(_,(name,ref)) -> case ref of
-                                   Variable tp -> do
+                                   Pointer tp -> do
                                      rtp <- toLLVMType tp
                                      return $ Just rtp
                                    _ -> return Nothing
@@ -174,9 +203,10 @@ compileFunction name ret args block = do
   ret_tp <- translateType ret
   rargs <- mapM (\(name,tp) -> do
                     rtp <- translateType tp
-                    return (name,rtp)) args
-  decl <- genFuncDecl (BS.pack name) ret_tp (map snd rargs)
-  stackAdd $ Map.fromList [(argn,(BS.pack argn,Variable argtp)) | (argn,argtp) <- rargs]
+                    ltp <- toLLVMType rtp
+                    return (name,rtp,ltp)) args
+  decl <- genFuncDecl (BS.pack name) ret_tp [tp | (_,tp,_) <- rargs]
+  stackAdd $ Map.fromList [(argn,(BS.pack argn,Variable argtp (LMNLocalVar (BS.pack argn) ltp))) | (argn,argtp,ltp) <- rargs]
   blks <- compileBody block ret_tp
   stackPop
   return $ LlvmFunction { funcDecl = decl
@@ -230,16 +260,17 @@ compileStatement (StmtBlock stmts) brk rtp = do
   return ([],blks,nrtp)
 compileStatement (StmtDecl name tp expr) _ rtp = do
   tp2 <- translateType tp
-  stackAlloc name tp2
-  rtp' <- translateType tp >>= toLLVMType
-  let tvar = LMNLocalVar (BS.pack name) (LMPointer rtp')
-  let alloc = Assignment tvar (Alloca rtp' 1)
+  --stackAlloc name tp2
+  rtp' <- toLLVMType tp2
   case expr of
-    Nothing -> return ([alloc],[],rtp)
+    Nothing -> do
+      var <- defaultValue tp2
+      stackPut name (Variable tp2 var)
+      return ([],[],rtp)
     Just rexpr -> do
-              (extra,res,_) <- compileExpression rexpr (Just tp2)
-              lbl <- newLabel
-              return ([Store res tvar,alloc]++extra,[],rtp)
+      (extra,res,_) <- compileExpression rexpr (Just tp2)
+      stackPut name (Variable tp2 res)
+      return (extra,[],rtp)
 compileStatement st@(StmtReturn expr) _ rtp = case expr of
   Nothing -> case rtp of
     Nothing -> return ([Return Nothing],[],Just TypeVoid)
@@ -249,31 +280,89 @@ compileStatement st@(StmtReturn expr) _ rtp = case expr of
   Just rexpr -> do
     (extra,res,rrtp) <- compileExpression rexpr rtp
     return ([Return (Just res)]++extra,[],Just rrtp)
-compileStatement (StmtFor e1 e2 e3 body) _ rtp = do
+compileStatement stmt@(StmtFor e1 e2 e3 body) _ rtp = do
+  lbl_start <- newLabel
+  lbl_test <- newLabel
+  lbl_end <- newLabel
+  begin <- case e1 of
+    Nothing -> return [Branch (LMLocalVar lbl_test LMLabel)]
+    Just re1 -> do
+      (res,_,_) <- compileExpression re1 Nothing
+      case e2 of
+        Nothing -> return res
+        Just _ -> return $ (Branch (LMLocalVar lbl_test LMLabel)):res
+  wvars <- mapM (\(cid@(ConstId _ (wvar:_))) -> do
+                    (_,Variable tp ref) <- stackLookup cid
+                    lbl <- newLabel
+                    rtp <- toLLVMType tp
+                    stackPut wvar (Variable tp (LMLocalVar lbl rtp))
+                    return (cid,tp,rtp,lbl,ref)
+                ) (Set.toList (writes [stmt]))
+  (_,st) <- get
+  (loop,nrtp) <- compileStatements body [] (Just lbl_end) rtp
+  let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
+  nloop <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
+  phis <- mapM (\(cid,tp,rtp,lbl,ref) -> do
+                   (_,Variable _ nref) <- stackLookup cid
+                   return (Assignment
+                           (LMLocalVar lbl rtp)
+                           (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
+                                     (nref,LMLocalVar lbl_loop LMLabel)]))) wvars
+  modify (\(uniq,_) -> (uniq,st))
+  test <- case e2 of
+    Nothing -> return []
+    Just re2 -> do
+      (res,tvar,_) <- compileExpression re2 (Just TypeBool)
+      return [LlvmBlock
+              (LlvmBlockId lbl_test)
+              ([BranchIf tvar (LMLocalVar lbl_loop LMLabel) (LMLocalVar lbl_end LMLabel)]++res++phis)]
+  
+  return ([Branch (LMLocalVar lbl_start LMLabel)],[LlvmBlock (LlvmBlockId lbl_end) []]++nloop++test++[LlvmBlock (LlvmBlockId lbl_start) begin],rtp)
+  {-
   begin <- case e1 of
             Nothing -> return []
             Just re1 -> do
                     (res,_,_) <- compileExpression re1 Nothing
                     return res
-  it <- case e3 of
-    Nothing -> return []
-    Just re3 -> do
-      (res,_,_) <- compileExpression re3 Nothing
-      return res
+  lbl_start <- newLabel
   lbl_cont <- newLabel
   lbl_end <- newLabel
   stackPush
-  (body_blks',nrtp) <- compileStatements body [] (Just lbl_end) rtp
-  stackPop
-  body_blks <- appendStatements ((Branch (LMLocalVar lbl_cont LMLabel):it)) body_blks'
-  let LlvmBlock { blockLabel = LlvmBlockId lbl_next } = last body_blks
+  (_,st1) <- get
+  vars1 <- mapMaybeM (\(name,(_,c)) -> case c of
+                                   Variable tp var -> do
+                                     nvar <- newLabel
+                                     ltp <- toLLVMType tp
+                                     return $ Just (name,tp,var,LMNLocalVar (BS.pack $ "v"++show nvar) ltp)
+                                   _ -> return Nothing
+                    ) $ concat $ map (\s -> Map.toList s) st1
+  mapM (\(name,tp,var,nvar) -> stackPut name (Variable tp nvar)) vars1
   sw <- case e2 of
          Nothing -> return Nothing
          Just re2 -> compileExpression re2 (Just TypeBool) >>= return.Just
+  (body_blks',nrtp) <- compileStatements body [] (Just lbl_end) rtp
+  it <- case e3 of
+         Nothing -> return []
+         Just re3 -> do
+                 (res,_,_) <- compileExpression re3 Nothing
+                 return res
+  (_,st2) <- get
+  let vars2 = map (\(name,tp,var,nvar) -> case stackLookup' (ConstId False [name]) st2 of
+                                           Just (_,Variable _ nnvar) -> (name,tp,var,nvar,nnvar)
+                  ) vars1
+  phis <- mapM (\(name,tp,var,nvar,nnvar) -> do
+                 rtp <- toLLVMType tp
+                 return $ Assignment nvar (Phi rtp [(var,LMLocalVar lbl_start LMLabel),(nnvar,LMLocalVar lbl_cont LMLabel)])) vars2
+  stackPop
+  body_blks <- appendStatements ((Branch (LMLocalVar lbl_cont LMLabel):it++phis)) body_blks'
+  let LlvmBlock { blockLabel = LlvmBlockId lbl_next } = last body_blks
+  
   let sw_stmt = case sw of
         Nothing -> []
         Just (stmts,res,_) -> [BranchIf res (LMLocalVar lbl_next LMLabel) (LMLocalVar lbl_end LMLabel)]++stmts
-  return ([Branch (LMLocalVar lbl_cont LMLabel)]++begin,[LlvmBlock (LlvmBlockId lbl_end) []]++body_blks++[LlvmBlock (LlvmBlockId lbl_cont) sw_stmt],nrtp)
+  return ([Branch (LMLocalVar lbl_start LMLabel)],
+          [LlvmBlock (LlvmBlockId lbl_end) []]++body_blks++[LlvmBlock (LlvmBlockId lbl_cont) sw_stmt,LlvmBlock (LlvmBlockId lbl_start) ([Branch (LMLocalVar lbl_cont LMLabel)]++begin)],nrtp)
+  -}
 compileStatement (StmtIf expr ifTrue mel) brk rtp = do
   lblEnd <- newLabel
   (res,var,_) <- compileExpression expr (Just TypeBool)
@@ -323,10 +412,9 @@ compileExpression (ExprInt n) tp = case tp of
 compileExpression e@(ExprId name) etp = do
   (n,ref) <- stackLookup name
   case ref of
-    Variable tp -> do
+    Variable tp var -> do
       typeCheck e etp tp
-      rtp <- toLLVMType tp
-      return ([],LMNLocalVar n rtp,tp)
+      return ([],var,tp)
     Pointer tp -> do
       typeCheck e etp tp
       rtp <- toLLVMType tp
@@ -340,7 +428,13 @@ compileExpression e@(ExprId name) etp = do
 compileExpression e@(ExprAssign Assign tid expr) etp = do
   (n,ref) <- stackLookup tid
   case ref of
-    Variable tp -> error "Please don't assign to function arguments yet..."
+    Variable tp var -> do
+      typeCheck e etp tp
+      (extra,res,_) <- compileExpression expr (Just tp)
+      llvmtp <- toLLVMType tp
+      let ConstId _ (name:_) = tid
+      stackPut name (Variable tp res)
+      return (extra,res,tp)
     Pointer ptp -> do
       typeCheck e etp ptp
       (extra,res,_) <- compileExpression expr (Just ptp)
@@ -376,13 +470,14 @@ compileExpression e@(ExprLambda args body) etp = do
   let fname = BS.pack ("lambda"++show fid)
   rargs <- mapM (\(name,tp) -> do
                     tp' <- translateType tp
-                    return (name,tp')) args
-  fdecl <- genFuncDecl fname TypeInt (map snd rargs)
+                    ltp <- toLLVMType tp'
+                    return (name,tp',ltp)) args
+  fdecl <- genFuncDecl fname TypeInt [ tp | (_,tp,_) <- rargs]
   let rtp = case etp of
         Just (TypeFunction r _) -> Just r
         _ -> Nothing
   (blks,nrtp) <- stackShadow $ do
-    stackAdd $ Map.fromList [ (name,(BS.pack name,Variable tp)) | (name,tp) <- rargs ]
+    stackAdd $ Map.fromList [ (name,(BS.pack name,Variable tp (LMNLocalVar (BS.pack name) ltp))) | (name,tp,ltp) <- rargs ]
     (stmts,blks,rtp2) <- compileStatement body Nothing rtp
     nblks <- appendStatements stmts blks
     return (nblks,rtp2)
@@ -394,7 +489,7 @@ compileExpression e@(ExprLambda args body) etp = do
                        }]
   let ftp = TypeFunction (case nrtp of
                              Nothing -> TypeVoid
-                             Just tp -> tp) (map snd rargs)
+                             Just tp -> tp) [tp | (_,tp,_) <- rargs]
   typeCheck e etp ftp
   return ([],LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False,ftp)
   
@@ -408,3 +503,42 @@ toLLVMType TypeBool = return $ LMInt 1
 toLLVMType (TypeId n) = do
   cls <- ask
   return (LMAlias $ fst $ cls!n)
+
+defaultValue :: RType -> Compiler LlvmVar
+defaultValue TypeInt = return (LMLitVar (LMIntLit 0 (LMInt 32)))
+
+writes :: [Statement] -> Set ConstantIdentifier
+writes xs = writes' xs Set.empty
+  where
+    writes' :: [Statement] -> Set ConstantIdentifier -> Set ConstantIdentifier
+    writes' [] s = s
+    writes' (x:xs) s = writes' xs (writes'' x s)
+
+    writes'' :: Statement -> Set ConstantIdentifier -> Set ConstantIdentifier
+    writes'' (StmtBlock stmts) s = writes' stmts s
+    writes'' (StmtExpr expr) s = writes''' expr s
+    writes'' (StmtDecl name _ (Just expr)) s = writes''' expr (Set.insert (ConstId False [name]) s)
+    writes'' (StmtIf cond ifTrue ifFalse) s = writes''' cond (writes'' ifTrue (case ifFalse of
+                                                                                  Nothing -> s
+                                                                                  Just e -> writes'' e s))
+    writes'' (StmtReturn (Just expr)) s = writes''' expr s
+    writes'' (StmtFor init cond it body) s = let s1 = case init of
+                                                   Nothing -> s
+                                                   Just r1 -> writes''' r1 s
+                                                 s2 = case cond of
+                                                   Nothing -> s1
+                                                   Just r2 -> writes''' r2 s1
+                                                 s3 = case it of
+                                                   Nothing -> s2
+                                                   Just r3 -> writes''' r3 s2
+                                             in writes' body s3
+    writes'' _ s = s
+    
+    writes''' :: Expression -> Set ConstantIdentifier -> Set ConstantIdentifier
+    writes''' (ExprAssign _ lhs rhs) s = writes''' rhs (Set.insert lhs s)
+    writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (cmd:args)
+    writes''' (ExprBin _ lhs rhs) s = writes''' rhs (writes''' lhs s)
+    writes''' (ExprIndex lhs rhs) s = writes''' rhs (writes''' rhs s)
+    writes''' (ExprLambda _ stmt) s = writes'' stmt s
+    writes''' _ s = s
+
