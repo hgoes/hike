@@ -238,6 +238,7 @@ readyBlocks :: [LlvmBlock] -> [LlvmBlock]
 readyBlocks = reverse.map (\blk -> blk { blockStmts = reverse (blockStmts blk) })
 
 appendStatements :: [LlvmStatement] -> [LlvmBlock] -> Compiler [LlvmBlock]
+appendStatements [] [] = return []
 appendStatements stmts [] = do
   lbl <- newLabel
   return [LlvmBlock { blockLabel = LlvmBlockId lbl
@@ -280,119 +281,23 @@ compileStatement st@(StmtReturn expr) _ rtp = case expr of
   Just rexpr -> do
     (extra,res,rrtp) <- compileExpression rexpr rtp
     return ([Return (Just res)]++extra,[],Just rrtp)
-compileStatement (StmtWhile cond body) _ rtp = do
-  lbl_start <- newLabel
-  lbl_test <- newLabel
-  lbl_end <- newLabel
-  wvars <- mapM (\(cid@(ConstId _ (wvar:_))) -> do
-                    (_,Variable tp ref) <- stackLookup cid
-                    lbl <- newLabel
-                    rtp <- toLLVMType tp
-                    stackPut wvar (Variable tp (LMLocalVar lbl rtp))
-                    return (cid,tp,rtp,lbl,ref)
-                ) (Set.toList (writes ((StmtExpr cond):body)))
-  (_,st) <- get
-  (loop,nrtp) <- compileStatements body [] (Just lbl_end) rtp
-  let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
-  nloop <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
-  phis <- mapM (\(cid,tp,rtp,lbl,ref) -> do
-                   (_,Variable _ nref) <- stackLookup cid
-                   return (Assignment
-                           (LMLocalVar lbl rtp)
-                           (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
-                                     (nref,LMLocalVar lbl_loop LMLabel)]))) wvars
-  modify (\(uniq,_) -> (uniq,st))
-  (test_stmts,test_var,_) <- compileExpression cond (Just TypeBool)
-  return ([Branch (LMLocalVar lbl_start LMLabel)],
-          [LlvmBlock (LlvmBlockId lbl_end) []]++nloop++
-          [LlvmBlock
-           (LlvmBlockId lbl_test)
-           ([BranchIf test_var (LMLocalVar lbl_loop LMLabel) (LMLocalVar lbl_end LMLabel)] ++ test_stmts ++ phis),
-           LlvmBlock (LlvmBlockId lbl_start) [Branch (LMLocalVar lbl_test LMLabel)]
-          ],rtp)
-compileStatement stmt@(StmtFor e1 e2 e3 body) _ rtp = do
-  lbl_start <- newLabel
-  lbl_test <- newLabel
-  lbl_end <- newLabel
-  begin <- case e1 of
-    Nothing -> return [Branch (LMLocalVar lbl_test LMLabel)]
-    Just re1 -> do
-      (res,_,_) <- compileExpression re1 Nothing
-      case e2 of
-        Nothing -> return res
-        Just _ -> return $ (Branch (LMLocalVar lbl_test LMLabel)):res
-  wvars <- mapM (\(cid@(ConstId _ (wvar:_))) -> do
-                    (_,Variable tp ref) <- stackLookup cid
-                    lbl <- newLabel
-                    rtp <- toLLVMType tp
-                    stackPut wvar (Variable tp (LMLocalVar lbl rtp))
-                    return (cid,tp,rtp,lbl,ref)
-                ) (Set.toList (writes [stmt]))
-  (_,st) <- get
-  (loop,nrtp) <- compileStatements body [] (Just lbl_end) rtp
-  let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
-  nloop <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
-  phis <- mapM (\(cid,tp,rtp,lbl,ref) -> do
-                   (_,Variable _ nref) <- stackLookup cid
-                   return (Assignment
-                           (LMLocalVar lbl rtp)
-                           (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
-                                     (nref,LMLocalVar lbl_loop LMLabel)]))) wvars
-  modify (\(uniq,_) -> (uniq,st))
-  test <- case e2 of
-    Nothing -> return []
-    Just re2 -> do
-      (res,tvar,_) <- compileExpression re2 (Just TypeBool)
-      return [LlvmBlock
-              (LlvmBlockId lbl_test)
-              ([BranchIf tvar (LMLocalVar lbl_loop LMLabel) (LMLocalVar lbl_end LMLabel)]++res++phis)]
-  
-  return ([Branch (LMLocalVar lbl_start LMLabel)],[LlvmBlock (LlvmBlockId lbl_end) []]++nloop++test++[LlvmBlock (LlvmBlockId lbl_start) begin],rtp)
-  {-
-  begin <- case e1 of
-            Nothing -> return []
-            Just re1 -> do
-                    (res,_,_) <- compileExpression re1 Nothing
-                    return res
-  lbl_start <- newLabel
-  lbl_cont <- newLabel
-  lbl_end <- newLabel
-  stackPush
-  (_,st1) <- get
-  vars1 <- mapMaybeM (\(name,(_,c)) -> case c of
-                                   Variable tp var -> do
-                                     nvar <- newLabel
-                                     ltp <- toLLVMType tp
-                                     return $ Just (name,tp,var,LMNLocalVar (BS.pack $ "v"++show nvar) ltp)
-                                   _ -> return Nothing
-                    ) $ concat $ map (\s -> Map.toList s) st1
-  mapM (\(name,tp,var,nvar) -> stackPut name (Variable tp nvar)) vars1
-  sw <- case e2 of
-         Nothing -> return Nothing
-         Just re2 -> compileExpression re2 (Just TypeBool) >>= return.Just
-  (body_blks',nrtp) <- compileStatements body [] (Just lbl_end) rtp
-  it <- case e3 of
-         Nothing -> return []
-         Just re3 -> do
-                 (res,_,_) <- compileExpression re3 Nothing
-                 return res
-  (_,st2) <- get
-  let vars2 = map (\(name,tp,var,nvar) -> case stackLookup' (ConstId False [name]) st2 of
-                                           Just (_,Variable _ nnvar) -> (name,tp,var,nvar,nnvar)
-                  ) vars1
-  phis <- mapM (\(name,tp,var,nvar,nnvar) -> do
-                 rtp <- toLLVMType tp
-                 return $ Assignment nvar (Phi rtp [(var,LMLocalVar lbl_start LMLabel),(nnvar,LMLocalVar lbl_cont LMLabel)])) vars2
-  stackPop
-  body_blks <- appendStatements ((Branch (LMLocalVar lbl_cont LMLabel):it++phis)) body_blks'
-  let LlvmBlock { blockLabel = LlvmBlockId lbl_next } = last body_blks
-  
-  let sw_stmt = case sw of
-        Nothing -> []
-        Just (stmts,res,_) -> [BranchIf res (LMLocalVar lbl_next LMLabel) (LMLocalVar lbl_end LMLabel)]++stmts
-  return ([Branch (LMLocalVar lbl_start LMLabel)],
-          [LlvmBlock (LlvmBlockId lbl_end) []]++body_blks++[LlvmBlock (LlvmBlockId lbl_cont) sw_stmt,LlvmBlock (LlvmBlockId lbl_start) ([Branch (LMLocalVar lbl_cont LMLabel)]++begin)],nrtp)
-  -}
+compileStatement (StmtWhile cond body) _ rtp = compileWhile cond body rtp Nothing
+compileStatement (StmtFor e1 e2 e3 body) _ rtp = do
+  (init_stmts,init_blks,nrtp) <- case e1 of
+    Nothing -> return ([],[],rtp)
+    Just r1 -> compileStatement (StmtExpr r1) Nothing rtp
+  init_blks' <- appendStatements init_stmts init_blks
+  let lbl_start = case init_blks' of
+        [] -> Nothing
+        (LlvmBlock (LlvmBlockId lbl) _:_) -> Just lbl
+  (body_stmts,body_blks,nnrtp) <- compileWhile
+                                  (case e2 of
+                                      Nothing -> ExprInt 1
+                                      Just r2 -> r2)              
+                                  (body++(case e3 of
+                                             Nothing -> []
+                                             Just r3 -> [StmtExpr r3])) nrtp lbl_start
+  return (body_stmts,body_blks++init_blks',nnrtp)
 compileStatement (StmtIf expr ifTrue mel) brk rtp = do
   lblEnd <- newLabel
   (res,var,_) <- compileExpression expr (Just TypeBool)
@@ -429,6 +334,43 @@ compileStatement (StmtExpr expr) _ rtp = do
 compileStatement StmtBreak Nothing _ = error "Nothing to break to"
 compileStatement StmtBreak (Just lbl) rtp = return ([Branch (LMLocalVar lbl LMLabel)],[],rtp)
 compileStatement _ _ rtp = return ([Unreachable],[],rtp)
+
+compileWhile cond body rtp mlbl_start = do
+  lbl_start <- case mlbl_start of
+    Just lbl -> return lbl
+    Nothing -> newLabel
+  lbl_test <- newLabel
+  lbl_end <- newLabel
+  wvars <- mapM (\(cid@(ConstId _ (wvar:_))) -> do
+                    (_,Variable tp ref) <- stackLookup cid
+                    lbl <- newLabel
+                    rtp <- toLLVMType tp
+                    stackPut wvar (Variable tp (LMLocalVar lbl rtp))
+                    return (cid,tp,rtp,lbl,ref)
+                ) (Set.toList (writes ((StmtExpr cond):body)))
+  (_,st) <- get
+  (loop,nrtp) <- compileStatements body [] (Just lbl_end) rtp
+  let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
+  nloop <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
+  phis <- mapM (\(cid,tp,rtp,lbl,ref) -> do
+                   (_,Variable _ nref) <- stackLookup cid
+                   return (Assignment
+                           (LMLocalVar lbl rtp)
+                           (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
+                                     (nref,LMLocalVar lbl_loop LMLabel)]))) wvars
+  modify (\(uniq,_) -> (uniq,st))
+  (test_stmts,test_var,_) <- compileExpression cond (Just TypeBool)
+  return (case mlbl_start of
+             Nothing -> [Branch (LMLocalVar lbl_start LMLabel)]
+             Just _ -> [],
+          [LlvmBlock (LlvmBlockId lbl_end) []]++nloop++
+          [LlvmBlock
+           (LlvmBlockId lbl_test)
+           ([BranchIf test_var (LMLocalVar lbl_loop LMLabel) (LMLocalVar lbl_end LMLabel)] ++ test_stmts ++ phis)
+          ]++(case mlbl_start of
+              Just _ -> []
+              Nothing -> [LlvmBlock (LlvmBlockId lbl_start) [Branch (LMLocalVar lbl_test LMLabel)]])
+          ,rtp)
 
 compileExpression :: Expression -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType)
 compileExpression (ExprInt n) tp = case tp of
