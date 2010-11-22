@@ -16,6 +16,7 @@ data CompileError
   | WrongReturnType Statement RType RType
   | LookupFailure ConstantIdentifier
   | NotAClass ConstantIdentifier
+  | MisuseOfClass String String
 
 instance Error CompileError where
   noMsg = GenericError "unknown error"
@@ -36,3 +37,4 @@ instance Show CompileError where
     show (WrongReturnType stmt got exp) = "statement "++show stmt++" returns type "++show got++", but "++show exp++" is expected"
     show (LookupFailure name) = "unknown identifier "++show name
     show (NotAClass name) = show name ++ " is not a class"
+    show (MisuseOfClass reason name) = "a class ("++name++") cannot be used for "++reason

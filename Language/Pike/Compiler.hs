@@ -29,7 +29,7 @@ data StackReference = Pointer RType
 
 type Stack = [Map String (BS.ByteString,StackReference)]
 
-type ClassMap = Map Integer (BS.ByteString,Map String (BS.ByteString,StackReference))
+type ClassMap = Map Integer (String,BS.ByteString,Map String (BS.ByteString,StackReference))
 
 resolve :: [Definition] -> Either [CompileError] (Map String (BS.ByteString,StackReference),ClassMap)
 resolve defs = let ((res,errs),(_,mp)) = runReader (runStateT (runWriterT (resolveBody defs)) ([0..],Map.empty)) []
@@ -66,7 +66,7 @@ resolveDef (Definition _ body) = case body of
   ClassDef name args body -> do
     rec { rbody <- local (rbody:) $ resolveBody body }
     (uniq,mp) <- get
-    put (tail uniq,Map.insert (head uniq) (BS.pack name,rbody) mp)
+    put (tail uniq,Map.insert (head uniq) (name,BS.pack name,rbody) mp)
     return $ Map.singleton name (BS.pack name,Class (head uniq))
   FunctionDef name rtp args body -> do
     rtp' <- resolveType rtp
@@ -188,14 +188,14 @@ compilePike defs = case resolve defs of
 generateAliases :: Compiler [LlvmAlias]
 generateAliases = do
   mp <- ask
-  mapM (\(_,(name,body)) -> do
+  mapM (\(_,(cname,int_cname,body)) -> do
            struct <- mapMaybeM (\(_,(name,ref)) -> case ref of
                                    Pointer tp -> do
                                      rtp <- toLLVMType tp
                                      return $ Just rtp
                                    _ -> return Nothing
                                ) (Map.toList body)
-           return (name,LMStruct struct)
+           return (int_cname,LMStruct struct)
        ) (Map.toList mp)
 
 compileFunction :: String -> Type -> [(String,Type)] -> [Statement] -> Compiler LlvmFunction
@@ -272,7 +272,7 @@ compileStatement (StmtDecl name tp expr) _ rtp = do
       stackPut name (Variable tp2 var)
       return ([],[],rtp)
     Just rexpr -> do
-      (extra,res,_) <- compileExpression rexpr (Just tp2)
+      (extra,res,_) <- compileExpression' "assignment" rexpr (Just tp2)
       stackPut name (Variable tp2 res)
       return (extra,[],rtp)
 compileStatement st@(StmtReturn expr) _ rtp = case expr of
@@ -282,7 +282,7 @@ compileStatement st@(StmtReturn expr) _ rtp = case expr of
       | rrtp == TypeVoid -> return ([Return Nothing],[],Just TypeVoid)
       | otherwise -> throwError [WrongReturnType st TypeVoid rrtp]
   Just rexpr -> do
-    (extra,res,rrtp) <- compileExpression rexpr rtp
+    (extra,res,rrtp) <- compileExpression' "return value" rexpr rtp
     return ([Return (Just res)]++extra,[],Just rrtp)
 compileStatement (StmtWhile cond body) _ rtp = compileWhile cond body rtp Nothing
 compileStatement (StmtFor e1 e2 e3 body) _ rtp = do
@@ -303,7 +303,7 @@ compileStatement (StmtFor e1 e2 e3 body) _ rtp = do
   return (body_stmts,body_blks++init_blks',nnrtp)
 compileStatement (StmtIf expr ifTrue mel) brk rtp = do
   lblEnd <- newLabel
-  (res,var,_) <- compileExpression expr (Just TypeBool)
+  (res,var,_) <- compileExpression' "condition" expr (Just TypeBool)
   stackPush
   (blksTrue,nrtp1) <- do
     (stmts,blks,nrtp) <- compileStatement ifTrue brk rtp
@@ -332,12 +332,13 @@ compileStatement (StmtIf expr ifTrue mel) brk rtp = do
           , blockStmts = []
           }]++blksFalse++blksTrue,nrtp2)
 compileStatement (StmtExpr expr) _ rtp = do
-  (stmts,var,_) <- compileExpression expr Nothing
+  (stmts,var,_) <- compileExpression' "statement expression" expr Nothing
   return (stmts,[],rtp)
 compileStatement StmtBreak Nothing _ = error "Nothing to break to"
 compileStatement StmtBreak (Just lbl) rtp = return ([Branch (LMLocalVar lbl LMLabel)],[],rtp)
 compileStatement _ _ rtp = return ([Unreachable],[],rtp)
 
+compileWhile :: Expression -> [Statement] -> Maybe RType -> Maybe Integer -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType)
 compileWhile cond body rtp mlbl_start = do
   lbl_start <- case mlbl_start of
     Just lbl -> return lbl
@@ -362,7 +363,7 @@ compileWhile cond body rtp mlbl_start = do
                            (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
                                      (nref,LMLocalVar lbl_loop LMLabel)]))) wvars
   modify (\(uniq,_) -> (uniq,st))
-  (test_stmts,test_var,_) <- compileExpression cond (Just TypeBool)
+  (test_stmts,test_var,_) <- compileExpression' "condition" cond (Just TypeBool)
   return (case mlbl_start of
              Nothing -> [Branch (LMLocalVar lbl_start LMLabel)]
              Just _ -> [],
@@ -375,69 +376,85 @@ compileWhile cond body rtp mlbl_start = do
               Nothing -> [LlvmBlock (LlvmBlockId lbl_start) [Branch (LMLocalVar lbl_test LMLabel)]])
           ,rtp)
 
-compileExpression :: Expression -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType)
+data CompileExprResult
+     = ResultCalc [LlvmStatement] LlvmVar RType
+     | ResultClass Integer
+     deriving Show
+
+compileExpression' :: String -> Expression -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType)
+compileExpression' reason expr rt = do
+  res <- compileExpression expr rt
+  case res of
+    ResultCalc stmts var ret -> return (stmts,var,ret)
+    ResultClass n -> do
+      classmap <- ask
+      let (name,_,_) = classmap!n
+      throwError [MisuseOfClass reason name]
+
+compileExpression :: Expression -> Maybe RType -> Compiler CompileExprResult
 compileExpression (ExprInt n) tp = case tp of
   Nothing -> do
     rtp <- toLLVMType TypeInt
-    return ([],LMLitVar $ LMIntLit n rtp,TypeInt)
+    return $ ResultCalc [] (LMLitVar $ LMIntLit n rtp) TypeInt
   Just rtp -> case rtp of
-    TypeInt -> return ([],LMLitVar $ LMIntLit n (LMInt 32),TypeInt)
-    TypeFloat -> return ([],LMLitVar $ LMFloatLit (fromIntegral n) LMDouble,TypeFloat)
+    TypeInt -> return $ ResultCalc [] (LMLitVar $ LMIntLit n (LMInt 32)) TypeInt
+    TypeFloat -> return $ ResultCalc [] (LMLitVar $ LMFloatLit (fromIntegral n) LMDouble) TypeFloat
     _ -> error $ "Ints can't have type "++show rtp
 compileExpression e@(ExprId name) etp = do
   (n,ref) <- stackLookup name
   case ref of
     Variable tp var -> do
       typeCheck e etp tp
-      return ([],var,tp)
+      return $ ResultCalc [] var tp
     Pointer tp -> do
       typeCheck e etp tp
       rtp <- toLLVMType tp
       lbl <- newLabel
       let tvar = LMLocalVar lbl rtp
-      return ([Assignment tvar (Load (LMNLocalVar n (LMPointer rtp)))],tvar,tp)
+      return $ ResultCalc [Assignment tvar (Load (LMNLocalVar n (LMPointer rtp)))] tvar tp
     Function tp args -> do
       typeCheck e etp (TypeFunction tp args)
       fdecl <- genFuncDecl n tp args
-      return ([],LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False,TypeFunction tp args)
+      return $ ResultCalc [] (LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False) (TypeFunction tp args)
+    Class n -> return $ ResultClass n
 compileExpression e@(ExprAssign Assign tid expr) etp = do
   (n,ref) <- stackLookup tid
   case ref of
     Variable tp var -> do
       typeCheck e etp tp
-      (extra,res,_) <- compileExpression expr (Just tp)
+      (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
       llvmtp <- toLLVMType tp
       let ConstId _ (name:_) = tid
       stackPut name (Variable tp res)
-      return (extra,res,tp)
+      return $ ResultCalc extra res tp
     Pointer ptp -> do
       typeCheck e etp ptp
-      (extra,res,_) <- compileExpression expr (Just ptp)
+      (extra,res,_) <- compileExpression' "assignment" expr (Just ptp)
       llvmtp <- toLLVMType ptp
-      return ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra,res,ptp)
+      return $ ResultCalc ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra) res ptp
 compileExpression e@(ExprBin op lexpr rexpr) etp = do
-  (lextra,lres,tpl) <- compileExpression lexpr Nothing
-  (rextra,rres,tpr) <- compileExpression rexpr (Just tpl)
+  (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
+  (rextra,rres,tpr) <- compileExpression' "binary expressions" rexpr (Just tpl)
   res <- newLabel
   case op of
     BinLess -> do
       typeCheck e etp TypeBool
       let resvar = LMLocalVar res (LMInt 1)
-      return ([Assignment resvar (Compare LM_CMP_Slt lres rres)]++rextra++lextra,resvar,TypeBool)
+      return $ ResultCalc ([Assignment resvar (Compare LM_CMP_Slt lres rres)]++rextra++lextra) resvar TypeBool
     BinPlus -> do
       typeCheck e etp tpl
       llvmtp <- toLLVMType tpl
       let resvar = LMLocalVar res llvmtp
-      return ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra,resvar,tpl)
+      return $ ResultCalc ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra) resvar tpl
 compileExpression e@(ExprCall expr args) etp = do
-  (eStmts,eVar,ftp) <- compileExpression expr Nothing
+  (eStmts,eVar,ftp) <- compileExpression' "calls" expr Nothing
   case ftp of
     TypeFunction rtp argtp
         | (length argtp) == (length args) -> do
-          rargs <- zipWithM (\arg tp -> compileExpression arg (Just tp)) args argtp
+          rargs <- zipWithM (\arg tp -> compileExpression' "function argument" arg (Just tp)) args argtp
           res <- newLabel
           resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
-          return ([Assignment resvar (Call StdCall eVar [ v | (_,v,_) <- rargs ] [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts,resvar,rtp)
+          return $ ResultCalc ([Assignment resvar (Call StdCall eVar [ v | (_,v,_) <- rargs ] [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
         | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
     _ -> throwError [NotAFunction e ftp]
 compileExpression e@(ExprLambda args body) etp = do
@@ -466,9 +483,7 @@ compileExpression e@(ExprLambda args body) etp = do
                              Nothing -> TypeVoid
                              Just tp -> tp) [tp | (_,tp,_) <- rargs]
   typeCheck e etp ftp
-  return ([],LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False,ftp)
-  
-    
+  return $ ResultCalc [] (LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False) ftp
 compileExpression expr _ = error $ "Couldn't compile expression "++show expr
 
 
@@ -477,7 +492,8 @@ toLLVMType TypeInt = return $ LMInt 32
 toLLVMType TypeBool = return $ LMInt 1
 toLLVMType (TypeId n) = do
   cls <- ask
-  return (LMAlias $ fst $ cls!n)
+  let (_,int_name,_) = cls!n
+  return (LMAlias int_name)
 
 defaultValue :: RType -> Compiler LlvmVar
 defaultValue TypeInt = return (LMLitVar (LMIntLit 0 (LMInt 32)))
