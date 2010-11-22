@@ -41,7 +41,7 @@ resolveType :: Type -> Resolver RType p
 resolveType (TypeId name) = do
   st <- ask
   let (t,res) = case stackLookup' name st of
-        Nothing -> ([LookupFailure name],undefined)
+        Nothing -> ([LookupFailure name Nothing],undefined)
         Just (_,ref) -> case ref of
           Class n -> ([],TypeId n)
           _ -> ([NotAClass name],undefined)
@@ -51,7 +51,7 @@ resolveType x = return $ fmap (const undefined) x -- This is a brutal hack
 
 translateType :: Type -> Compiler RType p
 translateType (TypeId name) = do
-  (_,ref) <- stackLookup name
+  (_,ref) <- stackLookup Nothing name
   case ref of
     Class n -> return (TypeId n)
     _ -> throwError [NotAClass name]
@@ -94,11 +94,11 @@ stackLookup' s@(ConstId _ (name:_)) (x:xs) = case Map.lookup name x of
   Nothing -> stackLookup' s xs
   Just ref -> Just ref
 
-stackLookup :: ConstantIdentifier -> Compiler (BS.ByteString,StackReference) p
-stackLookup s = do
+stackLookup :: Maybe p -> ConstantIdentifier -> Compiler (BS.ByteString,StackReference) p
+stackLookup pos s = do
   (_,st) <- get
   case stackLookup' s st of
-    Nothing -> error $ "Couldn't lookup "++show s
+    Nothing -> throwError [LookupFailure s pos]
     Just res -> return res
 
 stackAdd :: Map String (BS.ByteString,StackReference) -> Compiler () p
@@ -346,7 +346,7 @@ compileWhile cond body rtp mlbl_start = do
   lbl_test <- newLabel
   lbl_end <- newLabel
   wvars <- mapM (\(cid@(ConstId _ (wvar:_))) -> do
-                    (_,Variable tp ref) <- stackLookup cid
+                    (_,Variable tp ref) <- stackLookup Nothing cid
                     lbl <- newLabel
                     rtp <- toLLVMType tp
                     stackPut wvar (Variable tp (LMLocalVar lbl rtp))
@@ -357,7 +357,7 @@ compileWhile cond body rtp mlbl_start = do
   let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
   nloop <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
   phis <- mapM (\(cid,tp,rtp,lbl,ref) -> do
-                   (_,Variable _ nref) <- stackLookup cid
+                   (_,Variable _ nref) <- stackLookup Nothing cid
                    return (Assignment
                            (LMLocalVar lbl rtp)
                            (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
@@ -400,8 +400,8 @@ compileExpression _ (ExprInt n) tp = case tp of
     TypeInt -> return $ ResultCalc [] (LMLitVar $ LMIntLit n (LMInt 32)) TypeInt
     TypeFloat -> return $ ResultCalc [] (LMLitVar $ LMFloatLit (fromIntegral n) LMDouble) TypeFloat
     _ -> error $ "Ints can't have type "++show rtp
-compileExpression _ e@(ExprId name) etp = do
-  (n,ref) <- stackLookup name
+compileExpression pos e@(ExprId name) etp = do
+  (n,ref) <- stackLookup (Just pos) name
   case ref of
     Variable tp var -> do
       typeCheck e etp tp
@@ -417,8 +417,8 @@ compileExpression _ e@(ExprId name) etp = do
       fdecl <- genFuncDecl n tp args
       return $ ResultCalc [] (LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False) (TypeFunction tp args)
     Class n -> return $ ResultClass n
-compileExpression _ e@(ExprAssign Assign tid expr) etp = do
-  (n,ref) <- stackLookup tid
+compileExpression pos e@(ExprAssign Assign tid expr) etp = do
+  (n,ref) <- stackLookup (Just pos) tid
   case ref of
     Variable tp var -> do
       typeCheck e etp tp

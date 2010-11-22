@@ -14,7 +14,7 @@ data CompileError p
   | NotAFunction (Expression p) RType
   | WrongNumberOfArguments (Expression p) Int Int
   | WrongReturnType (Statement p) RType RType
-  | LookupFailure ConstantIdentifier
+  | LookupFailure ConstantIdentifier (Maybe p)
   | NotAClass ConstantIdentifier
   | MisuseOfClass String String
 
@@ -35,6 +35,8 @@ instance Show p => Show (CompileError p) where
     show (NotAFunction expr tp) = "type error: expression "++show expr++" should be a function but has type "++show tp
     show (WrongNumberOfArguments expr got exp) = "expression "++show expr++" takes "++show exp++" arguments, but got "++show got
     show (WrongReturnType stmt got exp) = "statement "++show stmt++" returns type "++show got++", but "++show exp++" is expected"
-    show (LookupFailure name) = "unknown identifier "++show name
+    show (LookupFailure name pos) = "unknown identifier "++show name++(case pos of
+                                                                          Just rpos -> " at "++show rpos
+                                                                          Nothing -> "")
     show (NotAClass name) = show name ++ " is not a class"
     show (MisuseOfClass reason name) = "a class ("++name++") cannot be used for "++reason
