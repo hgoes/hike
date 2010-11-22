@@ -1,13 +1,21 @@
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFunctor,FlexibleContexts #-}
 module Language.Pike.Syntax where
 
-data Definition = Definition [Modifier] DefinitionBody
-                deriving Show
+data Pos a p = Pos
+               { posObj :: (a p)
+               , position :: p
+               }
 
-data DefinitionBody
+instance Show (a p) => Show (Pos a p) where
+  show (Pos x _) = show x
+
+data Definition p = Definition [Modifier] (DefinitionBody p) p
+                  deriving Show
+
+data DefinitionBody p
     = Import (Either ConstantIdentifier String)
-    | FunctionDef String Type [(String,Type)] [Statement]
-    | ClassDef String [(String,Type)] [Definition]
+    | FunctionDef String Type [(String,Type)] [Pos Statement p]
+    | ClassDef String [(String,Type)] [Definition p]
     | VariableDef Type [String]
     deriving Show
 
@@ -43,26 +51,26 @@ data PType a = TypeInt
 data ConstantIdentifier = ConstId Bool [String]
                         deriving (Show,Eq,Ord)
 
-data Statement
-    = StmtBlock [Statement]
-    | StmtExpr Expression
-    | StmtDecl String Type (Maybe Expression)
-    | StmtIf Expression Statement (Maybe Statement)
-    | StmtReturn (Maybe Expression)
-    | StmtWhile Expression [Statement]
-    | StmtFor (Maybe Expression) (Maybe Expression) (Maybe Expression) [Statement]
+data Statement p
+    = StmtBlock [Pos Statement p]
+    | StmtExpr (Pos Expression p)
+    | StmtDecl String Type (Maybe (Pos Expression p))
+    | StmtIf (Pos Expression p) (Pos Statement p) (Maybe (Pos Statement p))
+    | StmtReturn (Maybe (Pos Expression p))
+    | StmtWhile (Pos Expression p) [Pos Statement p]
+    | StmtFor (Maybe (Pos Expression p)) (Maybe (Pos Expression p)) (Maybe (Pos Expression p)) [Pos Statement p]
     | StmtBreak
     deriving Show
 
-data Expression
+data Expression p
     = ExprId ConstantIdentifier
-    | ExprAssign AssignType ConstantIdentifier Expression
-    | ExprCall Expression [Expression]
+    | ExprAssign AssignType ConstantIdentifier (Pos Expression p)
+    | ExprCall (Pos Expression p) [Pos Expression p]
     | ExprString String
     | ExprInt Integer
-    | ExprBin BinOp Expression Expression
-    | ExprIndex Expression Expression
-    | ExprLambda [(String,Type)] Statement
+    | ExprBin BinOp (Pos Expression p) (Pos Expression p)
+    | ExprIndex (Pos Expression p) (Pos Expression p)
+    | ExprLambda [(String,Type)] (Pos Statement p)
     deriving Show
 
 data AssignType

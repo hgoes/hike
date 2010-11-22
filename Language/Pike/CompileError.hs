@@ -5,28 +5,28 @@ import Language.Pike.Tokens
 import Control.Monad.Error
 import Language.Pike.Syntax
 
-data CompileError
+data CompileError p
   = LexicalError Char Int Int
   | Expected String Token Int Int
   | UnknownError Token Int Int
   | GenericError String
-  | TypeMismatch Expression RType RType
-  | NotAFunction Expression RType
-  | WrongNumberOfArguments Expression Int Int
-  | WrongReturnType Statement RType RType
+  | TypeMismatch (Expression p) RType RType
+  | NotAFunction (Expression p) RType
+  | WrongNumberOfArguments (Expression p) Int Int
+  | WrongReturnType (Statement p) RType RType
   | LookupFailure ConstantIdentifier
   | NotAClass ConstantIdentifier
   | MisuseOfClass String String
 
-instance Error CompileError where
+instance Error (CompileError p) where
   noMsg = GenericError "unknown error"
   strMsg = GenericError
   
-instance Error [CompileError] where
+instance Error [CompileError p] where
   noMsg = [noMsg]
   strMsg str = [strMsg str]
 
-instance Show CompileError where
+instance Show p => Show (CompileError p) where
     show (LexicalError ch l c) = "lexical error in line "++show l++", column "++show c++": unexpected "++show ch
     show (Expected tp tok l c) = "unexpected "++show tok++" in line "++show l++", column "++show c++": expected "++tp
     show (GenericError str) = "generic error: "++str
