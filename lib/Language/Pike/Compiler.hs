@@ -417,21 +417,22 @@ compileExpression pos e@(ExprId name) etp = do
       fdecl <- genFuncDecl n tp args
       return $ ResultCalc [] (LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False) (TypeFunction tp args)
     Class n -> return $ ResultClass n
-compileExpression pos e@(ExprAssign Assign tid expr) etp = do
-  (n,ref) <- stackLookup (Just pos) tid
-  case ref of
-    Variable tp var -> do
-      typeCheck e etp tp
-      (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
-      llvmtp <- toLLVMType tp
-      let ConstId _ (name:_) = tid
-      stackPut name (Variable tp res)
-      return $ ResultCalc extra res tp
-    Pointer ptp -> do
-      typeCheck e etp ptp
-      (extra,res,_) <- compileExpression' "assignment" expr (Just ptp)
-      llvmtp <- toLLVMType ptp
-      return $ ResultCalc ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra) res ptp
+compileExpression pos e@(ExprAssign Assign lhs expr) etp = case lhs of
+  LVId tid -> do
+    (n,ref) <- stackLookup (Just pos) tid
+    case ref of
+      Variable tp var -> do
+        typeCheck e etp tp
+        (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
+        llvmtp <- toLLVMType tp
+        let ConstId _ (name:_) = tid
+        stackPut name (Variable tp res)
+        return $ ResultCalc extra res tp
+      Pointer ptp -> do
+        typeCheck e etp ptp
+        (extra,res,_) <- compileExpression' "assignment" expr (Just ptp)
+        llvmtp <- toLLVMType ptp
+        return $ ResultCalc ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra) res ptp
 compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
   (rextra,rres,tpr) <- compileExpression' "binary expressions" rexpr (Just tpl)
@@ -533,7 +534,9 @@ writes xs = writes' xs Set.empty
     writes'' _ s = s
     
     writes''' :: Expression p -> Set ConstantIdentifier -> Set ConstantIdentifier
-    writes''' (ExprAssign _ lhs (Pos rhs _)) s = writes''' rhs (Set.insert lhs s)
+    writes''' (ExprAssign _ lhs (Pos rhs _)) s = case lhs of
+                                                      LVId tid -> writes''' rhs (Set.insert tid s)
+                                                      _ -> writes''' rhs s
     writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (map posObj (cmd:args))
     writes''' (ExprBin _ (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' lhs s)
     writes''' (ExprIndex (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' rhs s)

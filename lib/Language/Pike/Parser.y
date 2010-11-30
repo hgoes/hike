@@ -142,9 +142,12 @@ ExpressionNP : ConstantIdentifier                    { ExprId $1 }
              | Expression "==" Expression            { ExprBin BinEqual $1 $3 }
              | Expression "->" identifier            { ExprAccess $1 $3 }
              | Expression "<" Expression             { ExprBin BinLess $1 $3 }
-             | ConstantIdentifier "=" Expression     { ExprAssign Assign $1 $3 }
+             | LValue "=" Expression                 { ExprAssign Assign $1 $3 }
              | Expression "[" Expression "]"         { ExprIndex $1 $3 }
              | "lambda" "(" Arguments ")" Statement  { ExprLambda $3 $5 }
+
+LValue : ConstantIdentifier     { LVId $1 }
+       | LValue "->" identifier { LVAccess $1 $3 }
 
 ExpressionOpt : Expression { Just $1 }
               |            { Nothing }

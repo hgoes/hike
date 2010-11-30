@@ -64,7 +64,7 @@ data Statement p
 
 data Expression p
     = ExprId ConstantIdentifier
-    | ExprAssign AssignType ConstantIdentifier (Pos Expression p)
+    | ExprAssign AssignType LValue (Pos Expression p)
     | ExprCall (Pos Expression p) [Pos Expression p]
     | ExprString String
     | ExprInt Integer
@@ -73,6 +73,11 @@ data Expression p
     | ExprIndex (Pos Expression p) (Pos Expression p)
     | ExprLambda [(String,Type)] (Pos Statement p)
     deriving Show
+
+data LValue
+  = LVId ConstantIdentifier
+  | LVAccess LValue String
+  deriving Show
 
 data AssignType
     = Assign
