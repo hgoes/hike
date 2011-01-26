@@ -211,7 +211,7 @@ compileFunction name ret args block = do
   stackPop
   return $ LlvmFunction { funcDecl = decl
                         , funcArgs = [BS.pack name | (name,tp) <- args]
-                        , funcAttrs = []
+                        , funcAttrs = [GC "shadow-stack"]
                         , funcSect = Nothing
                         , funcBody = blks
                         }
