@@ -12,6 +12,7 @@ import Control.Monad.Error
 tokens :-
   $white+                 ;
   array                   { key KeyArray }
+  bool                    { key KeyBool }
   break                   { key KeyBreak }
   class                   { key KeyClass }
   else                    { key KeyElse }
