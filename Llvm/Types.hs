@@ -39,7 +39,7 @@ data LlvmType
   | LMLabel              -- ^ A 'LlvmVar' can represent a label (address)
   | LMVoid               -- ^ Void type
   | LMStruct [LlvmType]  -- ^ Structure type
-  | LMAlias LlvmAlias    -- ^ A type alias
+  | LMAlias LMString     -- ^ A type alias
 
   -- | Function type, used to create pointers to functions
   | LMFunction LlvmFunctionDecl
@@ -66,7 +66,7 @@ instance Show LlvmType where
                         _otherwise                -> ""
       in show r ++ " (" ++ args ++ varg' ++ ")"
 
-  show (LMAlias (s,_)) = "%" ++ BS.unpack s
+  show (LMAlias s) = "%" ++ BS.unpack s
 
 -- | An LLVM section definition. If Nothing then let LLVM decide the section
 type LMSection = Maybe LMString
@@ -319,7 +319,8 @@ llvmWidthInBits LMLabel         = 0
 llvmWidthInBits LMVoid          = 0
 llvmWidthInBits (LMStruct tys)  = sum $ map llvmWidthInBits tys
 llvmWidthInBits (LMFunction  _) = 0
-llvmWidthInBits (LMAlias (_,t)) = llvmWidthInBits t
+llvmWidthInBits (LMAlias _)     = 0
+--llvmWidthInBits (LMAlias (_,t)) = llvmWidthInBits t
 
 
 -- -----------------------------------------------------------------------------

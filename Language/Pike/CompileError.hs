@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleInstances #-}
 module Language.Pike.CompileError where
 
 import Language.Pike.Tokens
@@ -9,14 +10,20 @@ data CompileError
   | Expected String Token Int Int
   | UnknownError Token Int Int
   | GenericError String
-  | TypeMismatch Expression Type Type
-  | NotAFunction Expression Type
+  | TypeMismatch Expression RType RType
+  | NotAFunction Expression RType
   | WrongNumberOfArguments Expression Int Int
-  | WrongReturnType Statement Type Type
+  | WrongReturnType Statement RType RType
+  | LookupFailure ConstantIdentifier
+  | NotAClass ConstantIdentifier
 
 instance Error CompileError where
   noMsg = GenericError "unknown error"
   strMsg = GenericError
+  
+instance Error [CompileError] where
+  noMsg = [noMsg]
+  strMsg str = [strMsg str]
 
 instance Show CompileError where
     show (LexicalError ch l c) = "lexical error in line "++show l++", column "++show c++": unexpected "++show ch
@@ -27,3 +34,5 @@ instance Show CompileError where
     show (NotAFunction expr tp) = "type error: expression "++show expr++" should be a function but has type "++show tp
     show (WrongNumberOfArguments expr got exp) = "expression "++show expr++" takes "++show exp++" arguments, but got "++show got
     show (WrongReturnType stmt got exp) = "statement "++show stmt++" returns type "++show got++", but "++show exp++" is expected"
+    show (LookupFailure name) = "unknown identifier "++show name
+    show (NotAClass name) = show name ++ " is not a class"

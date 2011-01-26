@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor #-}
 module Language.Pike.Syntax where
 
 data Definition = Definition [Modifier] DefinitionBody
@@ -26,6 +27,8 @@ data Modifier
 
 type Type = PType ConstantIdentifier
 
+type RType = PType Integer
+
 data PType a = TypeInt
              | TypeString
              | TypeFloat
@@ -35,7 +38,7 @@ data PType a = TypeInt
              | TypeArray (PType a)
              | TypeBool
              | TypeFunction (PType a) [PType a]
-             deriving (Show,Eq)
+             deriving (Show,Eq,Functor)
 
 data ConstantIdentifier = ConstId Bool [String]
                         deriving (Show,Eq)
