@@ -504,6 +504,8 @@ data LlvmFuncAttr
   -- | This attribute disables prologue / epilogue emission for the function.
   -- This can have very system-specific consequences.
   | Naked
+  -- | Uses a specific garbage collection algorithm when calling this function.
+  | GC String
   deriving (Eq)
 
 instance Show LlvmFuncAttr where
@@ -520,6 +522,7 @@ instance Show LlvmFuncAttr where
   show NoRedZone          = "noredzone"
   show NoImplicitFloat    = "noimplicitfloat"
   show Naked              = "naked"
+  show (GC name)          = "gc "++show name
 
 
 -- | Different types to call a function.
