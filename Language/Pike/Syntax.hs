@@ -24,16 +24,18 @@ data Modifier
     | Variant
     deriving Show
 
-data Type = TypeInt
-          | TypeString
-          | TypeFloat
-          | TypeProgram
-          | TypeVoid
-          | TypeId ConstantIdentifier
-          | TypeArray Type
-          | TypeBool
-          | TypeFunction Type [Type]
-          deriving (Show,Eq)
+type Type = PType ConstantIdentifier
+
+data PType a = TypeInt
+             | TypeString
+             | TypeFloat
+             | TypeProgram
+             | TypeVoid
+             | TypeId a
+             | TypeArray (PType a)
+             | TypeBool
+             | TypeFunction (PType a) [PType a]
+             deriving (Show,Eq)
 
 data ConstantIdentifier = ConstId Bool [String]
                         deriving (Show,Eq)
