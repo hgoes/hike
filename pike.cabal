@@ -1,11 +1,12 @@
 Name:           language-pike
 Version:        0.1
 Author:         Henning Günther
-Cabal-Version:  >=1.2
+Cabal-Version:  >=1.8
 Build-Type:     Simple
 
 Library
   Build-Depends:        base>=4,array,mtl,pretty,bytestring,containers
+  Hs-Source-Dirs:       lib
   Exposed-Modules:
     Language.Pike.Tokens
     Language.Pike.Lexer
@@ -18,3 +19,8 @@ Library
     Llvm.AbsSyn
     Llvm.PpLlvm
     Llvm.Types
+
+Executable hike
+  Build-Depends: language-pike,base>=4,process,filepath,bytestring
+  CPP-Options: "-DVERSION=\"0.1\""
+  Main-Is: Main.hs
