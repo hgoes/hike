@@ -122,7 +122,7 @@ compileFunction name ret args block = let decl = genFuncDecl (BS.pack name) ret 
                                       in do
                                         stackPush
                                         stackAdd [Variable argtp (BS.pack argn) | (argn,argtp) <- args]
-                                        blks <- compileBody block
+                                        blks <- compileBody block ret
                                         stackPop
                                         return $ LlvmFunction
                                              { funcDecl = decl
@@ -143,9 +143,9 @@ genFuncDecl name ret_tp args = LlvmFunctionDecl
                                , funcAlign = Nothing
                                }
 
-compileBody :: [Statement] -> Compiler [LlvmBlock]
-compileBody stmts = do
-  blks <- compileStatements stmts [] Nothing
+compileBody :: [Statement] -> Type -> Compiler [LlvmBlock]
+compileBody stmts rtp = do
+  (blks,nrtp) <- compileStatements stmts [] Nothing (Just rtp)
   return $ readyBlocks blks
 
 readyBlocks :: [LlvmBlock] -> [LlvmBlock]
@@ -159,36 +159,40 @@ appendStatements stmts [] = do
                     }]
 appendStatements stmts (x:xs) = return $ x { blockStmts = stmts ++ (blockStmts x) }:xs
 
-compileStatements :: [Statement] -> [LlvmBlock] -> Maybe Unique -> Compiler [LlvmBlock]
-compileStatements [] blks _ = return blks
-compileStatements (x:xs) blks brk = do
-  (stmts,nblks) <- compileStatement x brk
+compileStatements :: [Statement] -> [LlvmBlock] -> Maybe Unique -> Maybe Type -> Compiler ([LlvmBlock],Maybe Type)
+compileStatements [] blks _ rtp = return (blks,rtp)
+compileStatements (x:xs) blks brk rtp = do
+  (stmts,nblks,nrtp) <- compileStatement x brk rtp
   nblks2 <- appendStatements stmts blks
-  compileStatements xs (nblks ++ nblks2) brk
+  compileStatements xs (nblks ++ nblks2) brk nrtp
 
-compileStatement :: Statement -> Maybe Unique -> Compiler ([LlvmStatement],[LlvmBlock])
-compileStatement (StmtBlock stmts) brk = do
+compileStatement :: Statement -> Maybe Unique -> Maybe Type -> Compiler ([LlvmStatement],[LlvmBlock],Maybe Type)
+compileStatement (StmtBlock stmts) brk rtp = do
   stackPush
-  blks <- compileStatements stmts [] brk
+  (blks,nrtp) <- compileStatements stmts [] brk rtp
   stackPop
-  return ([],blks)
-compileStatement (StmtDecl name tp expr) _ = do
+  return ([],blks,nrtp)
+compileStatement (StmtDecl name tp expr) _ rtp = do
   stackAlloc name tp
-  let rtp = toLLVMType tp
-  let tvar = LMNLocalVar (BS.pack name) (LMPointer rtp)
-  let alloc = Assignment tvar (Alloca rtp 1)
+  let rtp' = toLLVMType tp
+  let tvar = LMNLocalVar (BS.pack name) (LMPointer rtp')
+  let alloc = Assignment tvar (Alloca rtp' 1)
   case expr of
-    Nothing -> return ([alloc],[])
+    Nothing -> return ([alloc],[],rtp)
     Just rexpr -> do
               (extra,res,_) <- compileExpression rexpr (Just tp)
               lbl <- newLabel
-              return ([Store res tvar,alloc]++extra,[])
-compileStatement (StmtReturn expr) _ = case expr of
-                                       Nothing -> return ([Return Nothing],[])
-                                       Just rexpr -> do
-                                                 (extra,res,_) <- compileExpression rexpr Nothing
-                                                 return ([Return (Just res)]++extra,[])
-compileStatement (StmtFor e1 e2 e3 body) _ = do
+              return ([Store res tvar,alloc]++extra,[],rtp)
+compileStatement st@(StmtReturn expr) _ rtp = case expr of
+  Nothing -> case rtp of
+    Nothing -> return ([Return Nothing],[],Just TypeVoid)
+    Just rrtp
+      | rrtp == TypeVoid -> return ([Return Nothing],[],Just TypeVoid)
+      | otherwise -> throwError (WrongReturnType st TypeVoid rrtp)
+  Just rexpr -> do
+    (extra,res,rrtp) <- compileExpression rexpr rtp
+    return ([Return (Just res)]++extra,[],Just rrtp)
+compileStatement (StmtFor e1 e2 e3 body) _ rtp = do
   begin <- case e1 of
             Nothing -> return []
             Just re1 -> do
@@ -202,7 +206,7 @@ compileStatement (StmtFor e1 e2 e3 body) _ = do
   lbl_cont <- newLabel
   lbl_end <- newLabel
   stackPush
-  body_blks' <- compileStatements body [] (Just lbl_end)
+  (body_blks',nrtp) <- compileStatements body [] (Just lbl_end) rtp
   stackPop
   body_blks <- appendStatements ((Branch (LMLocalVar lbl_cont LMLabel):it)) body_blks'
   let LlvmBlock { blockLabel = LlvmBlockId lbl_next } = last body_blks
@@ -212,24 +216,26 @@ compileStatement (StmtFor e1 e2 e3 body) _ = do
   let sw_stmt = case sw of
         Nothing -> []
         Just (stmts,res,_) -> [BranchIf res (LMLocalVar lbl_next LMLabel) (LMLocalVar lbl_end LMLabel)]++stmts
-  return ([Branch (LMLocalVar lbl_cont LMLabel)]++begin,[LlvmBlock (LlvmBlockId lbl_end) []]++body_blks++[LlvmBlock (LlvmBlockId lbl_cont) sw_stmt])
-compileStatement (StmtIf expr ifTrue mel) brk = do
+  return ([Branch (LMLocalVar lbl_cont LMLabel)]++begin,[LlvmBlock (LlvmBlockId lbl_end) []]++body_blks++[LlvmBlock (LlvmBlockId lbl_cont) sw_stmt],nrtp)
+compileStatement (StmtIf expr ifTrue mel) brk rtp = do
   lblEnd <- newLabel
   (res,var,_) <- compileExpression expr (Just TypeBool)
   stackPush
-  blksTrue <- compileStatement ifTrue brk
-              >>= uncurry appendStatements
-              >>= appendStatements [Branch (LMLocalVar lblEnd LMLabel)]
+  (blksTrue,nrtp1) <- do
+    (stmts,blks,nrtp) <- compileStatement ifTrue brk rtp
+    nblks <- appendStatements ([Branch (LMLocalVar lblEnd LMLabel)]++stmts) blks
+    return (nblks,nrtp)
   stackPop
-  blksFalse <- case mel of
-    Nothing -> return []
+  (blksFalse,nrtp2) <- case mel of
+    Nothing -> return ([],nrtp1)
     Just st -> do
       stackPush
-      blks <- compileStatement st brk
-              >>= uncurry appendStatements
-              >>= appendStatements [Branch (LMLocalVar lblEnd LMLabel)]
+      (blks,nrtp) <- do
+        (stmts,blks,nnrtp) <- compileStatement st brk nrtp1
+        nblks <- appendStatements ([Branch (LMLocalVar lblEnd LMLabel)]++stmts) blks
+        return (nblks,nnrtp)
       stackPop
-      return blks
+      return (blks,nrtp)
   let lblTrue = case blksTrue of
         [] -> lblEnd
         _  -> let LlvmBlock { blockLabel = LlvmBlockId lbl } = last blksTrue in lbl
@@ -240,13 +246,13 @@ compileStatement (StmtIf expr ifTrue mel) brk = do
           [LlvmBlock
           { blockLabel = LlvmBlockId lblEnd
           , blockStmts = []
-          }]++blksFalse++blksTrue)
-compileStatement (StmtExpr expr) _ = do
+          }]++blksFalse++blksTrue,nrtp2)
+compileStatement (StmtExpr expr) _ rtp = do
   (stmts,var,_) <- compileExpression expr Nothing
-  return (stmts,[])
-compileStatement StmtBreak Nothing = error "Nothing to break to"
-compileStatement StmtBreak (Just lbl) = return ([Branch (LMLocalVar lbl LMLabel)],[])
-compileStatement _ _ = return ([Unreachable],[])
+  return (stmts,[],rtp)
+compileStatement StmtBreak Nothing _ = error "Nothing to break to"
+compileStatement StmtBreak (Just lbl) rtp = return ([Branch (LMLocalVar lbl LMLabel)],[],rtp)
+compileStatement _ _ rtp = return ([Unreachable],[],rtp)
 
 compileExpression :: Expression -> Maybe Type -> Compiler ([LlvmStatement],LlvmVar,Type)
 compileExpression (ExprInt n) tp = case tp of
@@ -306,17 +312,25 @@ compileExpression e@(ExprLambda args body) etp = do
   fid <- newLabel
   let fname = BS.pack ("lambda"++show (hashUnique fid))
   let fdecl = genFuncDecl fname TypeInt (map snd args)
-  blks <- stackShadow $ do
+  let rtp = case etp of
+        Just (TypeFunction r _) -> Just r
+        _ -> Nothing
+  (blks,nrtp) <- stackShadow $ do
     stackAdd [ Variable tp (BS.pack name) | (name,tp) <- args ]
-    compileStatement body Nothing >>= uncurry appendStatements
+    (stmts,blks,rtp2) <- compileStatement body Nothing rtp
+    nblks <- appendStatements stmts blks
+    return (nblks,rtp2)
   tell $ [LlvmFunction { funcDecl = fdecl,
                          funcArgs = map (BS.pack . fst) args,
                          funcAttrs = [],
                          funcSect = Nothing,
                          funcBody = readyBlocks blks
                        }]
-  typeCheck e etp (TypeFunction TypeVoid (map snd args))
-  return ([],LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False,TypeFunction TypeVoid (map snd args))
+  let ftp = TypeFunction (case nrtp of
+                             Nothing -> TypeVoid
+                             Just tp -> tp) (map snd args)
+  typeCheck e etp ftp
+  return ([],LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False,ftp)
   
     
 compileExpression expr _ = error $ "Couldn't compile expression "++show expr
@@ -324,3 +338,4 @@ compileExpression expr _ = error $ "Couldn't compile expression "++show expr
 toLLVMType :: Type -> LlvmType
 toLLVMType TypeInt = LMInt 32
 toLLVMType TypeBool = LMInt 1
+toLLVMType t = error $ show t ++ " has no LLVM representation"

@@ -12,6 +12,7 @@ data CompileError
   | TypeMismatch Expression Type Type
   | NotAFunction Expression Type
   | WrongNumberOfArguments Expression Int Int
+  | WrongReturnType Statement Type Type
 
 instance Error CompileError where
   noMsg = GenericError "unknown error"
@@ -25,3 +26,4 @@ instance Show CompileError where
     show (TypeMismatch expr tp exp) = "type error: expression "++show expr++" has type "++show tp++", but "++show exp++" is expected"
     show (NotAFunction expr tp) = "type error: expression "++show expr++" should be a function but has type "++show tp
     show (WrongNumberOfArguments expr got exp) = "expression "++show expr++" takes "++show exp++" arguments, but got "++show got
+    show (WrongReturnType stmt got exp) = "statement "++show stmt++" returns type "++show got++", but "++show exp++" is expected"
