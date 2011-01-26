@@ -140,7 +140,7 @@ ExpressionNP : ConstantIdentifier                    { ExprId $1 }
              | const_int                             { ExprInt $1 }
              | Expression "+" Expression             { ExprBin BinPlus $1 $3 }
              | Expression "==" Expression            { ExprBin BinEqual $1 $3 }
-             | Expression "->" Expression            { ExprBin BinAccess $1 $3 }
+             | Expression "->" identifier            { ExprAccess $1 $3 }
              | Expression "<" Expression             { ExprBin BinLess $1 $3 }
              | ConstantIdentifier "=" Expression     { ExprAssign Assign $1 $3 }
              | Expression "[" Expression "]"         { ExprIndex $1 $3 }

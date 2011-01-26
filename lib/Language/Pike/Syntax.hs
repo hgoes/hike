@@ -69,6 +69,7 @@ data Expression p
     | ExprString String
     | ExprInt Integer
     | ExprBin BinOp (Pos Expression p) (Pos Expression p)
+    | ExprAccess (Pos Expression p) String
     | ExprIndex (Pos Expression p) (Pos Expression p)
     | ExprLambda [(String,Type)] (Pos Statement p)
     deriving Show
@@ -81,6 +82,5 @@ data AssignType
 data BinOp
     = BinPlus
     | BinEqual
-    | BinAccess
     | BinLess
     deriving Show
