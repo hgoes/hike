@@ -447,16 +447,23 @@ compileExpression e@(ExprBin op lexpr rexpr) etp = do
       let resvar = LMLocalVar res llvmtp
       return $ ResultCalc ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra) resvar tpl
 compileExpression e@(ExprCall expr args) etp = do
-  (eStmts,eVar,ftp) <- compileExpression' "calls" expr Nothing
-  case ftp of
-    TypeFunction rtp argtp
-        | (length argtp) == (length args) -> do
-          rargs <- zipWithM (\arg tp -> compileExpression' "function argument" arg (Just tp)) args argtp
-          res <- newLabel
-          resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
-          return $ ResultCalc ([Assignment resvar (Call StdCall eVar [ v | (_,v,_) <- rargs ] [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
-        | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
-    _ -> throwError [NotAFunction e ftp]
+  res <- compileExpression expr Nothing
+  case res of
+    ResultCalc eStmts eVar ftp -> case ftp of
+      TypeFunction rtp argtp
+          | (length argtp) == (length args) -> do
+            rargs <- zipWithM (\arg tp -> compileExpression' "function argument" arg (Just tp)) args argtp
+            res <- newLabel
+            resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
+            return $ ResultCalc ([Assignment resvar (Call StdCall eVar [ v | (_,v,_) <- rargs ] [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
+          | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
+      _ -> throwError [NotAFunction e ftp]
+    ResultClass n -> do
+      classmap <- ask
+      let (name,int_name,funcs) = classmap!n
+      lbl <- newLabel
+      let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
+      return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
 compileExpression e@(ExprLambda args body) etp = do
   fid <- newLabel
   let fname = BS.pack ("lambda"++show fid)
