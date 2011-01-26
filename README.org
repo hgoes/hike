@@ -1,0 +1,5 @@
+* Introduction
+  hike is a [[http://pike.ida.liu.se][pike]] language compiler written in haskell.
+* TODO-List
+** Implement a garbage collector
+   See [[http://llvm.org/docs/GarbageCollection.html][Accurate Garbage Collection with LLVM]].
