@@ -13,6 +13,7 @@ tokens :-
   $white+                 ;
   array                   { key KeyArray }
   break                   { key KeyBreak }
+  class                   { key KeyClass }
   else                    { key KeyElse }
   for                     { key KeyFor }
   if                      { key KeyIf }

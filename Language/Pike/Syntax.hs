@@ -8,6 +8,7 @@ data Signature = Sig Type [(String,Type)] deriving Show
 data DefinitionBody
     = Import (Either ConstantIdentifier String)
     | FunctionDef String Type [(String,Type)] [Statement]
+    | ClassDef String [(String,Type)] [Definition]
     deriving Show
 
 data Modifier
