@@ -41,7 +41,7 @@ data PType a = TypeInt
              deriving (Show,Eq,Functor)
 
 data ConstantIdentifier = ConstId Bool [String]
-                        deriving (Show,Eq)
+                        deriving (Show,Eq,Ord)
 
 data Statement
     = StmtBlock [Statement]
@@ -49,6 +49,7 @@ data Statement
     | StmtDecl String Type (Maybe Expression)
     | StmtIf Expression Statement (Maybe Statement)
     | StmtReturn (Maybe Expression)
+    | StmtWhile Expression [Statement]
     | StmtFor (Maybe Expression) (Maybe Expression) (Maybe Expression) [Statement]
     | StmtBreak
     deriving Show

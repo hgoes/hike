@@ -25,6 +25,7 @@ tokens :-
   return                  { key KeyReturn }
   string                  { key KeyString }
   void                    { key KeyVoid }
+  while                   { key KeyWhile }
   ":"                     { \p l -> const Colon }
   ";"                     { \p l -> const Semicolon }
   "."                     { \p l -> const Dot }
