@@ -71,12 +71,16 @@ Modifier : "public" { Public }
 DefinitionBody : "import" ConstantIdentifier ";"                     { Import $ Left $2 }
                | Type identifier "(" Arguments ")" Block             { FunctionDef $2 $1 $4 $6 }
                | "class" identifier ArgumentsOpt "{" Definitions "}" { ClassDef $2 $3 $5 }
+               | Type identifier IdentifiersN ";"                    { VariableDef $1 ($2:$3) }
 
 ConstantIdentifier : "." identifier ConstantIdentifierN { ConstId True ($2:$3) }
                    | identifier ConstantIdentifierN     { ConstId False ($1:$2) }
 
 ConstantIdentifierN : "." identifier ConstantIdentifierN { $2:$3 }
                     |                                    { [] }
+
+IdentifiersN : "," identifier IdentifiersN { $2:$3 }
+             |                             { [] }
 
 Type : "string"             { TypeString } 
      | "void"               { TypeVoid }

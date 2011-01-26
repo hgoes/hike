@@ -9,6 +9,7 @@ data DefinitionBody
     = Import (Either ConstantIdentifier String)
     | FunctionDef String Type [(String,Type)] [Statement]
     | ClassDef String [(String,Type)] [Definition]
+    | VariableDef Type [String]
     deriving Show
 
 data Modifier
