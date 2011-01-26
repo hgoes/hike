@@ -235,7 +235,10 @@ compileBody stmts rtp = do
   return $ readyBlocks blks
 
 readyBlocks :: [LlvmBlock] -> [LlvmBlock]
-readyBlocks = reverse.map (\blk -> blk { blockStmts = reverse (blockStmts blk) })
+readyBlocks = reverse.map (\blk -> blk { blockStmts = case blockStmts blk of
+                                            [] -> [Unreachable]
+                                            _ -> reverse (blockStmts blk) 
+                                       })
 
 appendStatements :: [LlvmStatement] -> [LlvmBlock] -> Compiler [LlvmBlock]
 appendStatements [] [] = return []
