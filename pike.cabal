@@ -20,7 +20,8 @@ Library
     Llvm.PpLlvm
     Llvm.Types
 
-Executable hike
-  Build-Depends: language-pike,base>=4,process,filepath,bytestring
-  CPP-Options: "-DVERSION=\"0.1\""
-  Main-Is: Main.hs
+Executable hike:
+  Build-Depends:       language-pike,process,filepath,base,bytestring
+  Hs-Source-Dirs:      bin
+  Main-Is:             Main.hs
+  Cpp-Options:         -DVERSION=0.1
