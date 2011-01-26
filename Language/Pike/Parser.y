@@ -63,7 +63,7 @@ import Control.Monad.Error
 Definitions : Definition Definitions { $1:$2 }
             |                        { [] }
 
-Definition : Modifiers DefinitionBody { Definition $1 $2 }
+Definition : Modifiers DefinitionBody {% do { pos <- getPos ; return $ Definition $1 $2 pos } }
 
 Modifiers : Modifier Modifiers { $1:$2 }
           |                    { [] }
@@ -110,34 +110,41 @@ Statement : Statement1 { $1 }
           | error      {%^ expected "statement" }
 --          | error      {%^ \tok -> do { (l,c) <- getPos ; throwError $ Expected "statement" tok l c } }
 
-Statement2 : "if" "(" Expression ")" Statement                    { StmtIf $3 $5 Nothing }
-           | "if" "(" Expression ")" Statement1 "else" Statement2 { StmtIf $3 $5 (Just $7) }
+Statement2 : Statement2NP {% do { pos <- getPos ; return $ Pos $1 pos } }
 
-Statement1 : "{" Statements "}"                                                    { StmtBlock $2 }
-           | Type identifier ";"                                                   { StmtDecl $2 $1 Nothing }
-           | Type identifier "=" ExpressionE ";"                                   { StmtDecl $2 $1 (Just $4) }
-           | Expression ";"                                                        { StmtExpr $1 }
-           | "if" "(" Expression ")" Statement1 "else" Statement1                  { StmtIf $3 $5 (Just $7) }
-           | "return" ExpressionE ";"                                              { StmtReturn (Just $2) }
-           | "return" ";"                                                          { StmtReturn Nothing }
-           | "while" "(" Expression ")" Block                                      { StmtWhile $3 $5 }
-           | "for" "(" ExpressionOpt ";" ExpressionOpt ";" ExpressionOpt ")" Block { StmtFor $3 $5 $7 $9 }
-           | "break" ";"                                                           { StmtBreak }
+Statement2NP : "if" "(" Expression ")" Statement                    { StmtIf $3 $5 Nothing }
+             | "if" "(" Expression ")" Statement1 "else" Statement2 { StmtIf $3 $5 (Just $7) }
+
+
+Statement1 : Statement1NP {% do { pos <- getPos ; return $ Pos $1 pos } }
+
+Statement1NP : "{" Statements "}"                                                    { StmtBlock $2 }
+             | Type identifier ";"                                                   { StmtDecl $2 $1 Nothing }
+             | Type identifier "=" ExpressionE ";"                                   { StmtDecl $2 $1 (Just $4) }
+             | Expression ";"                                                        { StmtExpr $1 }
+             | "if" "(" Expression ")" Statement1 "else" Statement1                  { StmtIf $3 $5 (Just $7) }
+             | "return" ExpressionE ";"                                              { StmtReturn (Just $2) }
+             | "return" ";"                                                          { StmtReturn Nothing }
+             | "while" "(" Expression ")" Block                                      { StmtWhile $3 $5 }
+             | "for" "(" ExpressionOpt ";" ExpressionOpt ";" ExpressionOpt ")" Block { StmtFor $3 $5 $7 $9 }
+             | "break" ";"                                                           { StmtBreak }
 
 ExpressionE : Expression { $1 }
             | error      {%^ expected "expression" }
 
-Expression : ConstantIdentifier                    { ExprId $1 }
-           | Expression "(" ExprList ")"           { ExprCall $1 $3 }
-           | const_string                          { ExprString $1 }
-           | const_int                             { ExprInt $1 }
-           | Expression "+" Expression             { ExprBin BinPlus $1 $3 }
-           | Expression "==" Expression            { ExprBin BinEqual $1 $3 }
-           | Expression "->" Expression            { ExprBin BinAccess $1 $3 }
-           | Expression "<" Expression             { ExprBin BinLess $1 $3 }
-           | ConstantIdentifier "=" Expression     { ExprAssign Assign $1 $3 }
-           | Expression "[" Expression "]"         { ExprIndex $1 $3 }
-           | "lambda" "(" Arguments ")" Statement  { ExprLambda $3 $5 }
+Expression : ExpressionNP {% do { pos <- getPos ; return $ Pos $1 pos } }
+
+ExpressionNP : ConstantIdentifier                    { ExprId $1 }
+             | Expression "(" ExprList ")"           { ExprCall $1 $3 }
+             | const_string                          { ExprString $1 }
+             | const_int                             { ExprInt $1 }
+             | Expression "+" Expression             { ExprBin BinPlus $1 $3 }
+             | Expression "==" Expression            { ExprBin BinEqual $1 $3 }
+             | Expression "->" Expression            { ExprBin BinAccess $1 $3 }
+             | Expression "<" Expression             { ExprBin BinLess $1 $3 }
+             | ConstantIdentifier "=" Expression     { ExprAssign Assign $1 $3 }
+             | Expression "[" Expression "]"         { ExprIndex $1 $3 }
+             | "lambda" "(" Arguments ")" Statement  { ExprLambda $3 $5 }
 
 ExpressionOpt : Expression { Just $1 }
               |            { Nothing }

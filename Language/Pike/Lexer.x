@@ -57,14 +57,14 @@ data LexerState = LexerState
                   , curCode :: !Int
                   } deriving Show
 
-type Lexer a = ErrorT CompileError (State LexerState) a
+type Lexer a = ErrorT (CompileError (Int,Int)) (State LexerState) a
 
 type AlexInput = (LexerPos,Char,LBS.ByteString)
 
 lexerStartPos :: LexerPos
 lexerStartPos = LexerPos 1 0
 
-runLexer :: Lexer a -> LBS.ByteString -> Either CompileError a
+runLexer :: Lexer a -> LBS.ByteString -> Either (CompileError (Int,Int)) a
 runLexer lex bs = evalState (runErrorT lex) (LexerState lexerStartPos bs '\n' 0)
 
 lexerMove :: LexerPos -> Char -> LexerPos

@@ -17,9 +17,9 @@ import qualified Data.Map as Map (mapMaybe,map)
 import Data.Set as Set hiding (map)
 import qualified Data.Set as Set
 
-type Compiler a = ErrorT [CompileError] (StateT ([Integer],Stack) (WriterT [LlvmFunction] (Reader ClassMap))) a
+type Compiler a p = ErrorT [CompileError p] (StateT ([Integer],Stack) (WriterT [LlvmFunction] (Reader ClassMap))) a
 
-type Resolver a = WriterT [CompileError] (StateT ([Integer],ClassMap) (Reader Stack)) a
+type Resolver a p = WriterT [CompileError p] (StateT ([Integer],ClassMap) (Reader Stack)) a
 
 data StackReference = Pointer RType
                     | Variable RType LlvmVar
@@ -31,13 +31,13 @@ type Stack = [Map String (BS.ByteString,StackReference)]
 
 type ClassMap = Map Integer (String,BS.ByteString,Map String (BS.ByteString,StackReference))
 
-resolve :: [Definition] -> Either [CompileError] (Map String (BS.ByteString,StackReference),ClassMap)
+resolve :: [Definition p] -> Either [CompileError p] (Map String (BS.ByteString,StackReference),ClassMap)
 resolve defs = let ((res,errs),(_,mp)) = runReader (runStateT (runWriterT (resolveBody defs)) ([0..],Map.empty)) []
                in case errs of
                  [] -> Right (res,mp)
                  _ -> Left errs
 
-resolveType :: Type -> Resolver RType
+resolveType :: Type -> Resolver RType p
 resolveType (TypeId name) = do
   st <- ask
   let (t,res) = case stackLookup' name st of
@@ -49,7 +49,7 @@ resolveType (TypeId name) = do
   return res
 resolveType x = return $ fmap (const undefined) x -- This is a brutal hack
 
-translateType :: Type -> Compiler RType
+translateType :: Type -> Compiler RType p
 translateType (TypeId name) = do
   (_,ref) <- stackLookup name
   case ref of
@@ -58,8 +58,8 @@ translateType (TypeId name) = do
 translateType x = return $ fmap (const undefined) x
     
 
-resolveDef :: Definition -> Resolver (Map String (BS.ByteString,StackReference))
-resolveDef (Definition _ body) = case body of
+resolveDef :: Definition p -> Resolver (Map String (BS.ByteString,StackReference)) p
+resolveDef (Definition _ body _) = case body of
   VariableDef tp names -> do
     rtp <- resolveType tp
     return $ Map.fromList $ map (\name -> (name,(BS.pack name,Pointer rtp))) names
@@ -74,7 +74,7 @@ resolveDef (Definition _ body) = case body of
     return $ Map.singleton name (BS.pack name,Function rtp' targs)
   Import _ -> return Map.empty
 
-resolveBody :: [Definition] -> Resolver (Map String (BS.ByteString,StackReference))
+resolveBody :: [Definition p] -> Resolver (Map String (BS.ByteString,StackReference)) p
 resolveBody [] = return Map.empty
 resolveBody (def:defs) = do
   refs1 <- resolveDef def
@@ -85,7 +85,7 @@ stackAlloc' :: String -> RType -> Stack -> Stack
 stackAlloc' name tp []     = [Map.singleton name (BS.pack name,Pointer tp)]
 stackAlloc' name tp (x:xs) = (Map.insert name (BS.pack name,Pointer tp) x):xs
 
-stackAlloc :: String -> RType -> Compiler ()
+stackAlloc :: String -> RType -> Compiler () p
 stackAlloc name tp = modify $ \(uniq,st) -> (uniq,stackAlloc' name tp st)
 
 stackLookup' :: ConstantIdentifier -> Stack -> Maybe (BS.ByteString,StackReference)
@@ -94,23 +94,23 @@ stackLookup' s@(ConstId _ (name:_)) (x:xs) = case Map.lookup name x of
   Nothing -> stackLookup' s xs
   Just ref -> Just ref
 
-stackLookup :: ConstantIdentifier -> Compiler (BS.ByteString,StackReference)
+stackLookup :: ConstantIdentifier -> Compiler (BS.ByteString,StackReference) p
 stackLookup s = do
   (_,st) <- get
   case stackLookup' s st of
     Nothing -> error $ "Couldn't lookup "++show s
     Just res -> return res
 
-stackAdd :: Map String (BS.ByteString,StackReference) -> Compiler ()
+stackAdd :: Map String (BS.ByteString,StackReference) -> Compiler () p
 stackAdd refs = modify $ \(uniq,st) -> (uniq,refs:st)
 
-stackPush :: Compiler ()
+stackPush :: Compiler () p
 stackPush = modify $ \(uniq,st) -> (uniq,Map.empty:st)
 
-stackPop :: Compiler ()
+stackPop :: Compiler () p
 stackPop = modify $ \(uniq,st) -> (uniq,tail st)
 
-stackShadow :: Compiler a -> Compiler a
+stackShadow :: Compiler a p -> Compiler a p
 stackShadow comp = do
   (uniq,st) <- get
   put (uniq,[])
@@ -119,7 +119,7 @@ stackShadow comp = do
   put (nuniq,st)
   return res
 
-stackPut :: String -> StackReference -> Compiler ()
+stackPut :: String -> StackReference -> Compiler () p
 stackPut name ref = do
   (uniq,st) <- get
   let nst = case st of
@@ -145,19 +145,19 @@ stackDiff comp = do
   (_,st2) <- get
   return (res,reverse $ stackDiff' (reverse st1) (reverse st2))-}
 
-newLabel :: Compiler Integer
+newLabel :: Compiler Integer p
 newLabel = do
   (x:xs,st) <- get
   put (xs,st)
   return x
 
-runCompiler :: ClassMap -> Compiler a -> Either [CompileError] a
+runCompiler :: ClassMap -> Compiler a p -> Either [CompileError p] a
 runCompiler mp c = fst $ runReader (runWriterT $ evalStateT (runErrorT c) ([0..],[])) mp
 
 mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
 mapMaybeM f xs = mapM f xs >>= return.catMaybes
 
-typeCheck :: Expression -> Maybe RType -> RType -> Compiler ()
+typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
 typeCheck expr Nothing act = return ()
 typeCheck expr (Just req@(TypeFunction TypeVoid args)) act@(TypeFunction _ eargs)
   | args == eargs = return ()
@@ -166,14 +166,14 @@ typeCheck expr (Just req) act
   | req == act = return ()
   | otherwise = throwError [TypeMismatch expr act req]
 
-compilePike :: [Definition] -> Either [CompileError] LlvmModule
+compilePike :: [Definition p] -> Either [CompileError p] LlvmModule
 compilePike defs = case resolve defs of
   Left errs -> Left errs
   Right (st,mp) -> runCompiler mp $ do
     ((f1,aliases),f2) <- listen $ do
       alias <- generateAliases
       stackAdd st
-      funcs <- mapMaybeM (\(Definition mods x) -> case x of
+      funcs <- mapMaybeM (\(Definition mods x _) -> case x of
                              FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just
                              _ -> return Nothing) defs
       stackPop
@@ -185,7 +185,7 @@ compilePike defs = case resolve defs of
                          , modFuncs = f2++f1
                          }
 
-generateAliases :: Compiler [LlvmAlias]
+generateAliases :: Compiler [LlvmAlias] p
 generateAliases = do
   mp <- ask
   mapM (\(_,(cname,int_cname,body)) -> do
@@ -198,7 +198,7 @@ generateAliases = do
            return (int_cname,LMStruct struct)
        ) (Map.toList mp)
 
-compileFunction :: String -> Type -> [(String,Type)] -> [Statement] -> Compiler LlvmFunction
+compileFunction :: String -> Type -> [(String,Type)] -> [Pos Statement p] -> Compiler LlvmFunction p
 compileFunction name ret args block = do
   ret_tp <- translateType ret
   rargs <- mapM (\(name,tp) -> do
@@ -216,7 +216,7 @@ compileFunction name ret args block = do
                         , funcBody = blks
                         }
 
-genFuncDecl :: BS.ByteString -> RType -> [RType] -> Compiler LlvmFunctionDecl
+genFuncDecl :: BS.ByteString -> RType -> [RType] -> Compiler LlvmFunctionDecl p
 genFuncDecl name ret_tp args = do
   rret_tp <- toLLVMType ret_tp
   rargs <- mapM (\tp -> toLLVMType tp >>= return.(,[])) args
@@ -229,7 +229,7 @@ genFuncDecl name ret_tp args = do
                             , funcAlign = Nothing
                             }
 
-compileBody :: [Statement] -> RType -> Compiler [LlvmBlock]
+compileBody :: [Pos Statement p] -> RType -> Compiler [LlvmBlock] p
 compileBody stmts rtp = do
   (blks,nrtp) <- compileStatements stmts [] Nothing (Just rtp)
   return $ readyBlocks blks
@@ -240,7 +240,7 @@ readyBlocks = reverse.map (\blk -> blk { blockStmts = case blockStmts blk of
                                             _ -> reverse (blockStmts blk) 
                                        })
 
-appendStatements :: [LlvmStatement] -> [LlvmBlock] -> Compiler [LlvmBlock]
+appendStatements :: [LlvmStatement] -> [LlvmBlock] -> Compiler [LlvmBlock] p
 appendStatements [] [] = return []
 appendStatements stmts [] = do
   lbl <- newLabel
@@ -249,20 +249,20 @@ appendStatements stmts [] = do
                     }]
 appendStatements stmts (x:xs) = return $ x { blockStmts = stmts ++ (blockStmts x) }:xs
 
-compileStatements :: [Statement] -> [LlvmBlock] -> Maybe Integer -> Maybe RType -> Compiler ([LlvmBlock],Maybe RType)
+compileStatements :: [Pos Statement p] -> [LlvmBlock] -> Maybe Integer -> Maybe RType -> Compiler ([LlvmBlock],Maybe RType) p
 compileStatements [] blks _ rtp = return (blks,rtp)
-compileStatements (x:xs) blks brk rtp = do
-  (stmts,nblks,nrtp) <- compileStatement x brk rtp
+compileStatements ((Pos x pos):xs) blks brk rtp = do
+  (stmts,nblks,nrtp) <- compileStatement pos x brk rtp
   nblks2 <- appendStatements stmts blks
   compileStatements xs (nblks ++ nblks2) brk nrtp
 
-compileStatement :: Statement -> Maybe Integer -> Maybe RType -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType)
-compileStatement (StmtBlock stmts) brk rtp = do
+compileStatement :: p -> Statement p -> Maybe Integer -> Maybe RType -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType) p
+compileStatement _ (StmtBlock stmts) brk rtp = do
   stackPush
   (blks,nrtp) <- compileStatements stmts [] brk rtp
   stackPop
   return ([],blks,nrtp)
-compileStatement (StmtDecl name tp expr) _ rtp = do
+compileStatement _ (StmtDecl name tp expr) _ rtp = do
   tp2 <- translateType tp
   --stackAlloc name tp2
   rtp' <- toLLVMType tp2
@@ -275,7 +275,7 @@ compileStatement (StmtDecl name tp expr) _ rtp = do
       (extra,res,_) <- compileExpression' "assignment" rexpr (Just tp2)
       stackPut name (Variable tp2 res)
       return (extra,[],rtp)
-compileStatement st@(StmtReturn expr) _ rtp = case expr of
+compileStatement _ st@(StmtReturn expr) _ rtp = case expr of
   Nothing -> case rtp of
     Nothing -> return ([Return Nothing],[],Just TypeVoid)
     Just rrtp
@@ -284,38 +284,38 @@ compileStatement st@(StmtReturn expr) _ rtp = case expr of
   Just rexpr -> do
     (extra,res,rrtp) <- compileExpression' "return value" rexpr rtp
     return ([Return (Just res)]++extra,[],Just rrtp)
-compileStatement (StmtWhile cond body) _ rtp = compileWhile cond body rtp Nothing
-compileStatement (StmtFor e1 e2 e3 body) _ rtp = do
+compileStatement _ (StmtWhile cond body) _ rtp = compileWhile cond body rtp Nothing
+compileStatement pos (StmtFor e1 e2 e3 body) _ rtp = do
   (init_stmts,init_blks,nrtp) <- case e1 of
     Nothing -> return ([],[],rtp)
-    Just r1 -> compileStatement (StmtExpr r1) Nothing rtp
+    Just r1 -> compileStatement pos (StmtExpr r1) Nothing rtp
   init_blks' <- appendStatements init_stmts init_blks
   let lbl_start = case init_blks' of
         [] -> Nothing
         (LlvmBlock (LlvmBlockId lbl) _:_) -> Just lbl
   (body_stmts,body_blks,nnrtp) <- compileWhile
                                   (case e2 of
-                                      Nothing -> ExprInt 1
-                                      Just r2 -> r2)              
+                                      Nothing -> Pos (ExprInt 1) pos
+                                      Just r2 -> r2)    
                                   (body++(case e3 of
                                              Nothing -> []
-                                             Just r3 -> [StmtExpr r3])) nrtp lbl_start
+                                             Just r3 -> [Pos (StmtExpr r3) pos])) nrtp lbl_start
   return (body_stmts,body_blks++init_blks',nnrtp)
-compileStatement (StmtIf expr ifTrue mel) brk rtp = do
+compileStatement _ (StmtIf expr (Pos ifTrue tpos) mel) brk rtp = do
   lblEnd <- newLabel
   (res,var,_) <- compileExpression' "condition" expr (Just TypeBool)
   stackPush
   (blksTrue,nrtp1) <- do
-    (stmts,blks,nrtp) <- compileStatement ifTrue brk rtp
+    (stmts,blks,nrtp) <- compileStatement tpos ifTrue brk rtp
     nblks <- appendStatements ([Branch (LMLocalVar lblEnd LMLabel)]++stmts) blks
     return (nblks,nrtp)
   stackPop
   (blksFalse,nrtp2) <- case mel of
     Nothing -> return ([],nrtp1)
-    Just st -> do
+    Just (Pos st stpos) -> do
       stackPush
       (blks,nrtp) <- do
-        (stmts,blks,nnrtp) <- compileStatement st brk nrtp1
+        (stmts,blks,nnrtp) <- compileStatement stpos st brk nrtp1
         nblks <- appendStatements ([Branch (LMLocalVar lblEnd LMLabel)]++stmts) blks
         return (nblks,nnrtp)
       stackPop
@@ -331,14 +331,14 @@ compileStatement (StmtIf expr ifTrue mel) brk rtp = do
           { blockLabel = LlvmBlockId lblEnd
           , blockStmts = []
           }]++blksFalse++blksTrue,nrtp2)
-compileStatement (StmtExpr expr) _ rtp = do
+compileStatement _ (StmtExpr expr) _ rtp = do
   (stmts,var,_) <- compileExpression' "statement expression" expr Nothing
   return (stmts,[],rtp)
-compileStatement StmtBreak Nothing _ = error "Nothing to break to"
-compileStatement StmtBreak (Just lbl) rtp = return ([Branch (LMLocalVar lbl LMLabel)],[],rtp)
-compileStatement _ _ rtp = return ([Unreachable],[],rtp)
+compileStatement _ StmtBreak Nothing _ = error "Nothing to break to"
+compileStatement _ StmtBreak (Just lbl) rtp = return ([Branch (LMLocalVar lbl LMLabel)],[],rtp)
+compileStatement _ _ _ rtp = return ([Unreachable],[],rtp)
 
-compileWhile :: Expression -> [Statement] -> Maybe RType -> Maybe Integer -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType)
+compileWhile :: Pos Expression p -> [Pos Statement p] -> Maybe RType -> Maybe Integer -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType) p
 compileWhile cond body rtp mlbl_start = do
   lbl_start <- case mlbl_start of
     Just lbl -> return lbl
@@ -351,7 +351,7 @@ compileWhile cond body rtp mlbl_start = do
                     rtp <- toLLVMType tp
                     stackPut wvar (Variable tp (LMLocalVar lbl rtp))
                     return (cid,tp,rtp,lbl,ref)
-                ) (Set.toList (writes ((StmtExpr cond):body)))
+                ) (Set.toList (writes ((StmtExpr cond):(map posObj body))))
   (_,st) <- get
   (loop,nrtp) <- compileStatements body [] (Just lbl_end) rtp
   let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
@@ -381,9 +381,9 @@ data CompileExprResult
      | ResultClass Integer
      deriving Show
 
-compileExpression' :: String -> Expression -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType)
-compileExpression' reason expr rt = do
-  res <- compileExpression expr rt
+compileExpression' :: String -> Pos Expression p -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType) p
+compileExpression' reason (Pos expr pos) rt = do
+  res <- compileExpression pos expr rt
   case res of
     ResultCalc stmts var ret -> return (stmts,var,ret)
     ResultClass n -> do
@@ -391,8 +391,8 @@ compileExpression' reason expr rt = do
       let (name,_,_) = classmap!n
       throwError [MisuseOfClass reason name]
 
-compileExpression :: Expression -> Maybe RType -> Compiler CompileExprResult
-compileExpression (ExprInt n) tp = case tp of
+compileExpression :: p -> Expression p -> Maybe RType -> Compiler CompileExprResult p
+compileExpression _ (ExprInt n) tp = case tp of
   Nothing -> do
     rtp <- toLLVMType TypeInt
     return $ ResultCalc [] (LMLitVar $ LMIntLit n rtp) TypeInt
@@ -400,7 +400,7 @@ compileExpression (ExprInt n) tp = case tp of
     TypeInt -> return $ ResultCalc [] (LMLitVar $ LMIntLit n (LMInt 32)) TypeInt
     TypeFloat -> return $ ResultCalc [] (LMLitVar $ LMFloatLit (fromIntegral n) LMDouble) TypeFloat
     _ -> error $ "Ints can't have type "++show rtp
-compileExpression e@(ExprId name) etp = do
+compileExpression _ e@(ExprId name) etp = do
   (n,ref) <- stackLookup name
   case ref of
     Variable tp var -> do
@@ -417,7 +417,7 @@ compileExpression e@(ExprId name) etp = do
       fdecl <- genFuncDecl n tp args
       return $ ResultCalc [] (LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False) (TypeFunction tp args)
     Class n -> return $ ResultClass n
-compileExpression e@(ExprAssign Assign tid expr) etp = do
+compileExpression _ e@(ExprAssign Assign tid expr) etp = do
   (n,ref) <- stackLookup tid
   case ref of
     Variable tp var -> do
@@ -432,7 +432,7 @@ compileExpression e@(ExprAssign Assign tid expr) etp = do
       (extra,res,_) <- compileExpression' "assignment" expr (Just ptp)
       llvmtp <- toLLVMType ptp
       return $ ResultCalc ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra) res ptp
-compileExpression e@(ExprBin op lexpr rexpr) etp = do
+compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
   (rextra,rres,tpr) <- compileExpression' "binary expressions" rexpr (Just tpl)
   res <- newLabel
@@ -446,8 +446,8 @@ compileExpression e@(ExprBin op lexpr rexpr) etp = do
       llvmtp <- toLLVMType tpl
       let resvar = LMLocalVar res llvmtp
       return $ ResultCalc ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra) resvar tpl
-compileExpression e@(ExprCall expr args) etp = do
-  res <- compileExpression expr Nothing
+compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
+  res <- compileExpression rpos expr Nothing
   case res of
     ResultCalc eStmts eVar ftp -> case ftp of
       TypeFunction rtp argtp
@@ -464,7 +464,7 @@ compileExpression e@(ExprCall expr args) etp = do
       lbl <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
-compileExpression e@(ExprLambda args body) etp = do
+compileExpression _ e@(ExprLambda args (Pos body body_pos)) etp = do
   fid <- newLabel
   let fname = BS.pack ("lambda"++show fid)
   rargs <- mapM (\(name,tp) -> do
@@ -477,7 +477,7 @@ compileExpression e@(ExprLambda args body) etp = do
         _ -> Nothing
   (blks,nrtp) <- stackShadow $ do
     stackAdd $ Map.fromList [ (name,(BS.pack name,Variable tp (LMNLocalVar (BS.pack name) ltp))) | (name,tp,ltp) <- rargs ]
-    (stmts,blks,rtp2) <- compileStatement body Nothing rtp
+    (stmts,blks,rtp2) <- compileStatement body_pos body Nothing rtp
     nblks <- appendStatements stmts blks
     return (nblks,rtp2)
   tell $ [LlvmFunction { funcDecl = fdecl,
@@ -491,10 +491,10 @@ compileExpression e@(ExprLambda args body) etp = do
                              Just tp -> tp) [tp | (_,tp,_) <- rargs]
   typeCheck e etp ftp
   return $ ResultCalc [] (LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False) ftp
-compileExpression expr _ = error $ "Couldn't compile expression "++show expr
+compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
 
 
-toLLVMType :: RType -> Compiler LlvmType
+toLLVMType :: RType -> Compiler LlvmType p
 toLLVMType TypeInt = return $ LMInt 32
 toLLVMType TypeBool = return $ LMInt 1
 toLLVMType (TypeId n) = do
@@ -502,41 +502,41 @@ toLLVMType (TypeId n) = do
   let (_,int_name,_) = cls!n
   return (LMAlias int_name)
 
-defaultValue :: RType -> Compiler LlvmVar
+defaultValue :: RType -> Compiler LlvmVar p
 defaultValue TypeInt = return (LMLitVar (LMIntLit 0 (LMInt 32)))
 
-writes :: [Statement] -> Set ConstantIdentifier
+writes :: [Statement p] -> Set ConstantIdentifier
 writes xs = writes' xs Set.empty
   where
-    writes' :: [Statement] -> Set ConstantIdentifier -> Set ConstantIdentifier
+    writes' :: [Statement p] -> Set ConstantIdentifier -> Set ConstantIdentifier
     writes' [] s = s
     writes' (x:xs) s = writes' xs (writes'' x s)
 
-    writes'' :: Statement -> Set ConstantIdentifier -> Set ConstantIdentifier
-    writes'' (StmtBlock stmts) s = writes' stmts s
-    writes'' (StmtExpr expr) s = writes''' expr s
-    writes'' (StmtDecl name _ (Just expr)) s = writes''' expr (Set.insert (ConstId False [name]) s)
-    writes'' (StmtIf cond ifTrue ifFalse) s = writes''' cond (writes'' ifTrue (case ifFalse of
-                                                                                  Nothing -> s
-                                                                                  Just e -> writes'' e s))
-    writes'' (StmtReturn (Just expr)) s = writes''' expr s
+    writes'' :: Statement p -> Set ConstantIdentifier -> Set ConstantIdentifier
+    writes'' (StmtBlock stmts) s = writes' (map posObj stmts) s
+    writes'' (StmtExpr expr) s = writes''' (posObj expr) s
+    writes'' (StmtDecl name _ (Just expr)) s = writes''' (posObj expr) (Set.insert (ConstId False [name]) s)
+    writes'' (StmtIf cond (Pos ifTrue _) ifFalse) s = writes''' (posObj cond) (writes'' ifTrue (case ifFalse of
+                                                                                                   Nothing -> s
+                                                                                                   Just (Pos e _) -> writes'' e s))
+    writes'' (StmtReturn (Just expr)) s = writes''' (posObj expr) s
     writes'' (StmtFor init cond it body) s = let s1 = case init of
                                                    Nothing -> s
-                                                   Just r1 -> writes''' r1 s
+                                                   Just (Pos r1 _) -> writes''' r1 s
                                                  s2 = case cond of
                                                    Nothing -> s1
-                                                   Just r2 -> writes''' r2 s1
+                                                   Just (Pos r2 _) -> writes''' r2 s1
                                                  s3 = case it of
                                                    Nothing -> s2
-                                                   Just r3 -> writes''' r3 s2
-                                             in writes' body s3
+                                                   Just (Pos r3 _) -> writes''' r3 s2
+                                             in writes' (map posObj body) s3
     writes'' _ s = s
     
-    writes''' :: Expression -> Set ConstantIdentifier -> Set ConstantIdentifier
-    writes''' (ExprAssign _ lhs rhs) s = writes''' rhs (Set.insert lhs s)
-    writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (cmd:args)
-    writes''' (ExprBin _ lhs rhs) s = writes''' rhs (writes''' lhs s)
-    writes''' (ExprIndex lhs rhs) s = writes''' rhs (writes''' rhs s)
-    writes''' (ExprLambda _ stmt) s = writes'' stmt s
+    writes''' :: Expression p -> Set ConstantIdentifier -> Set ConstantIdentifier
+    writes''' (ExprAssign _ lhs (Pos rhs _)) s = writes''' rhs (Set.insert lhs s)
+    writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (map posObj (cmd:args))
+    writes''' (ExprBin _ (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' lhs s)
+    writes''' (ExprIndex (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' rhs s)
+    writes''' (ExprLambda _ (Pos stmt _)) s = writes'' stmt s
     writes''' _ s = s
 
