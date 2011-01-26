@@ -6,14 +6,12 @@ module Llvm.AbsSyn where
 
 import Llvm.Types
 
-import Data.Unique
-
 -- | Block labels
-newtype LlvmBlockId = LlvmBlockId Unique
+newtype LlvmBlockId = LlvmBlockId Integer
     deriving (Eq,Ord)
 
 instance Show LlvmBlockId where
-    show (LlvmBlockId x) = show (hashUnique x)
+    show (LlvmBlockId x) = show x
 
 -- | A block of LLVM code.
 data LlvmBlock = LlvmBlock {

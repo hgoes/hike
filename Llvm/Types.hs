@@ -9,7 +9,6 @@ import Numeric
 
 --import Constants
 --import FastString
-import Data.Unique
 import qualified Data.ByteString.Char8 as BS
 
 -- from NCG
@@ -79,7 +78,7 @@ data LlvmVar
   -- | Variables with a global scope.
   = LMGlobalVar LMString LlvmType LlvmLinkageType LMSection LMAlign LMConst
   -- | Variables local to a function or parameters.
-  | LMLocalVar Unique LlvmType
+  | LMLocalVar Integer LlvmType
   -- | Named local variables. Sometimes we need to be able to explicitly name
   -- variables (e.g for function arguments).
   | LMNLocalVar LMString LlvmType
@@ -200,8 +199,8 @@ getName v@(LMLitVar    _          ) = getPlainName v
 -- in a plain textual representation (e.g. @x@, @y@ or @42@).
 getPlainName :: LlvmVar -> String
 getPlainName (LMGlobalVar x _ _ _ _ _) = BS.unpack x
-getPlainName (LMLocalVar  x LMLabel  ) = "L" ++ show (hashUnique x)
-getPlainName (LMLocalVar  x _        ) = "v" ++ show (hashUnique x)
+getPlainName (LMLocalVar  x LMLabel  ) = "L" ++ show x
+getPlainName (LMLocalVar  x _        ) = "v" ++ show x
 getPlainName (LMNLocalVar x _        ) = BS.unpack x
 getPlainName (LMLitVar    x          ) = getLit x
 
