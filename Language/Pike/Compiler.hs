@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 module Language.Pike.Compiler where
 
 import Language.Pike.Syntax
@@ -17,6 +18,7 @@ type Compiler a = ErrorT CompileError (StateT ([Unique],Stack) (Writer [LlvmFunc
 data StackReference = Pointer Type BS.ByteString
                     | Variable Type BS.ByteString
                     | Function Type [Type] BS.ByteString
+                    | Class [StackReference] BS.ByteString
                     deriving Show
 
 type Stack = [[StackReference]]
@@ -26,6 +28,8 @@ initialStack [] = []
 initialStack ((Definition _ body):xs)
     = case body of
         FunctionDef name tp args _ -> (Function tp [t | (_,t) <- args] (BS.pack name)):rest
+        ClassDef name args defs -> (Class (initialStack defs) (BS.pack name)):rest
+        VariableDef tp names -> [ Variable tp (BS.pack name) | name <- names ] ++ rest
         _ -> rest
     where
       rest = initialStack xs
@@ -44,6 +48,7 @@ stackLookup' s@(ConstId _ (name:_)) (x:xs) = case find (\ref -> case ref of
                                                                  Pointer _ n -> n == BS.pack name
                                                                  Variable _ n -> n == BS.pack name
                                                                  Function _ _ n -> n == BS.pack name
+                                                                 Class _ n -> n == BS.pack name
                                                        ) x of
                                                Nothing -> stackLookup' s xs
                                                Just ref -> ref
@@ -118,8 +123,8 @@ compilePike defs = do
              }
 
 compileFunction :: String -> Type -> [(String,Type)] -> [Statement] -> Compiler LlvmFunction
-compileFunction name ret args block = let decl = genFuncDecl (BS.pack name) ret (map snd args)
-                                      in do
+compileFunction name ret args block = do
+                                        decl <- genFuncDecl (BS.pack name) ret (map snd args)
                                         stackPush
                                         stackAdd [Variable argtp (BS.pack argn) | (argn,argtp) <- args]
                                         blks <- compileBody block ret
@@ -132,16 +137,18 @@ compileFunction name ret args block = let decl = genFuncDecl (BS.pack name) ret 
                                              , funcBody = blks
                                              }
 
-genFuncDecl :: BS.ByteString -> Type -> [Type] -> LlvmFunctionDecl
-genFuncDecl name ret_tp args = LlvmFunctionDecl
-                               { decName = name
-                               , funcLinkage = External
-                               , funcCc = CC_Fastcc
-                               , decReturnType = toLLVMType ret_tp
-                               , decVarargs = FixedArgs
-                               , decParams = map (\arg -> (toLLVMType arg,[])) args
-                               , funcAlign = Nothing
-                               }
+genFuncDecl :: BS.ByteString -> Type -> [Type] -> Compiler LlvmFunctionDecl
+genFuncDecl name ret_tp args = do
+  rret_tp <- toLLVMType ret_tp
+  rargs <- mapM (\tp -> toLLVMType tp >>= return.(,[])) args
+  return $ LlvmFunctionDecl { decName = name
+                            , funcLinkage = External
+                            , funcCc = CC_Fastcc
+                            , decReturnType = rret_tp
+                            , decVarargs = FixedArgs
+                            , decParams = rargs
+                            , funcAlign = Nothing
+                            }
 
 compileBody :: [Statement] -> Type -> Compiler [LlvmBlock]
 compileBody stmts rtp = do
@@ -174,7 +181,7 @@ compileStatement (StmtBlock stmts) brk rtp = do
   return ([],blks,nrtp)
 compileStatement (StmtDecl name tp expr) _ rtp = do
   stackAlloc name tp
-  let rtp' = toLLVMType tp
+  rtp' <- toLLVMType tp
   let tvar = LMNLocalVar (BS.pack name) (LMPointer rtp')
   let alloc = Assignment tvar (Alloca rtp' 1)
   case expr of
@@ -256,7 +263,9 @@ compileStatement _ _ rtp = return ([Unreachable],[],rtp)
 
 compileExpression :: Expression -> Maybe Type -> Compiler ([LlvmStatement],LlvmVar,Type)
 compileExpression (ExprInt n) tp = case tp of
-  Nothing -> return ([],LMLitVar $ LMIntLit n (toLLVMType TypeInt),TypeInt)
+  Nothing -> do
+    rtp <- toLLVMType TypeInt
+    return ([],LMLitVar $ LMIntLit n rtp,TypeInt)
   Just rtp -> case rtp of
     TypeInt -> return ([],LMLitVar $ LMIntLit n (LMInt 32),TypeInt)
     TypeFloat -> return ([],LMLitVar $ LMFloatLit (fromIntegral n) LMDouble,TypeFloat)
@@ -266,16 +275,18 @@ compileExpression e@(ExprId name) etp = do
   case ref of
     Variable tp n -> do
       typeCheck e etp tp
-      return ([],LMNLocalVar n (toLLVMType tp),tp)
+      rtp <- toLLVMType tp
+      return ([],LMNLocalVar n rtp,tp)
     Pointer tp n -> do
       typeCheck e etp tp
-      let rtp = toLLVMType tp
+      rtp <- toLLVMType tp
       lbl <- newLabel
       let tvar = LMLocalVar lbl rtp
       return ([Assignment tvar (Load (LMNLocalVar n (LMPointer rtp)))],tvar,tp)
     Function tp args n -> do
       typeCheck e etp (TypeFunction tp args)
-      return ([],LMGlobalVar n (LMFunction (genFuncDecl n tp args)) External Nothing Nothing False,TypeFunction tp args)
+      fdecl <- genFuncDecl n tp args
+      return ([],LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False,TypeFunction tp args)
 compileExpression e@(ExprAssign Assign tid expr) etp = do
   ref <- stackLookup tid
   case ref of
@@ -283,7 +294,8 @@ compileExpression e@(ExprAssign Assign tid expr) etp = do
     Pointer ptp n -> do
       typeCheck e etp ptp
       (extra,res,_) <- compileExpression expr (Just ptp)
-      return ([Store res (LMNLocalVar n (LMPointer (toLLVMType ptp)))]++extra,res,ptp)
+      llvmtp <- toLLVMType ptp
+      return ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra,res,ptp)
 compileExpression e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression lexpr Nothing
   (rextra,rres,tpr) <- compileExpression rexpr (Just tpl)
@@ -295,7 +307,8 @@ compileExpression e@(ExprBin op lexpr rexpr) etp = do
       return ([Assignment resvar (Compare LM_CMP_Slt lres rres)]++rextra++lextra,resvar,TypeBool)
     BinPlus -> do
       typeCheck e etp tpl
-      let resvar = LMLocalVar res (toLLVMType tpl)
+      llvmtp <- toLLVMType tpl
+      let resvar = LMLocalVar res llvmtp
       return ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra,resvar,tpl)
 compileExpression e@(ExprCall expr args) etp = do
   (eStmts,eVar,ftp) <- compileExpression expr Nothing
@@ -304,14 +317,14 @@ compileExpression e@(ExprCall expr args) etp = do
         | (length argtp) == (length args) -> do
           rargs <- zipWithM (\arg tp -> compileExpression arg (Just tp)) args argtp
           res <- newLabel
-          let resvar = LMLocalVar res (toLLVMType rtp)
+          resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
           return ([Assignment resvar (Call StdCall eVar [ v | (_,v,_) <- rargs ] [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts,resvar,rtp)
         | otherwise -> throwError (WrongNumberOfArguments e (length  args) (length argtp))
     _ -> throwError (NotAFunction e ftp)
 compileExpression e@(ExprLambda args body) etp = do
   fid <- newLabel
   let fname = BS.pack ("lambda"++show (hashUnique fid))
-  let fdecl = genFuncDecl fname TypeInt (map snd args)
+  fdecl <- genFuncDecl fname TypeInt (map snd args)
   let rtp = case etp of
         Just (TypeFunction r _) -> Just r
         _ -> Nothing
@@ -335,7 +348,18 @@ compileExpression e@(ExprLambda args body) etp = do
     
 compileExpression expr _ = error $ "Couldn't compile expression "++show expr
 
-toLLVMType :: Type -> LlvmType
-toLLVMType TypeInt = LMInt 32
-toLLVMType TypeBool = LMInt 1
+toLLVMType :: Type -> Compiler LlvmType
+toLLVMType TypeInt = return (LMInt 32)
+toLLVMType TypeBool = return (LMInt 1)
+toLLVMType (TypeId name) = do
+  ref <- stackLookup name
+  case ref of
+    Class st _ -> stackShadow $ do
+      stackAdd st
+      res <- mapMaybeM (\sref -> case sref of
+                           Variable tp _ -> toLLVMType tp >>= return.Just
+                           _ -> return Nothing) st
+      stackPop
+      return (LMStruct res)
+    _ -> error $ show name ++ " is not a class"
 toLLVMType t = error $ show t ++ " has no LLVM representation"
