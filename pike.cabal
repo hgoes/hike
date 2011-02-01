@@ -25,3 +25,4 @@ Executable hike:
   Hs-Source-Dirs:      bin
   Main-Is:             Main.hs
   Cpp-Options:         -DVERSION=0.1
+
