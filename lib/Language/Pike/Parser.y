@@ -4,7 +4,7 @@ module Language.Pike.Parser where
 import Language.Pike.Syntax
 import Language.Pike.Tokens
 import Language.Pike.Lexer
-import Language.Pike.CompileError
+import Language.Pike.Compiler.Error
 
 import Control.Monad.Error
 }

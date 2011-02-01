@@ -1,182 +1,36 @@
-{-# LANGUAGE TupleSections, DoRec #-}
+{-# LANGUAGE TupleSections #-}
 module Language.Pike.Compiler where
 
 import Language.Pike.Syntax
-import Language.Pike.CompileError
-import Llvm
+import Language.Pike.Compiler.Resolver as Re
+import Language.Pike.Compiler.Monad
+import Language.Pike.Compiler.Stack as St
+import Language.Pike.Compiler.Error
+import Llvm.Types
+import Llvm.AbsSyn
+
 import qualified Data.ByteString.Char8 as BS
-import Data.Maybe (mapMaybe,catMaybes)
-import System.IO.Unsafe (unsafeInterleaveIO)
-import Control.Monad.State
-import Control.Monad.Writer
-import Control.Monad.Error
-import Control.Monad.Reader
-import Data.List (find)
-import Data.Map as Map hiding (map,mapMaybe)
-import qualified Data.Map as Map (mapMaybe,map)
-import Data.Set as Set hiding (map)
-import qualified Data.Set as Set
+import Data.Map as Map
+import Data.Set as Set
+import Control.Monad.Writer hiding (mapM)
+import Control.Monad.Reader hiding (mapM)
+import Control.Monad.State hiding (mapM)
+import Control.Monad.Error hiding (mapM)
+import Data.Traversable (mapM)
+import Prelude hiding (mapM)
+import Data.Maybe (catMaybes)
 
-type Compiler a p = ErrorT [CompileError p] (StateT ([Integer],Stack) (WriterT [LlvmFunction] (Reader ClassMap))) a
+import Debug.Trace
 
-type Resolver a p = WriterT [CompileError p] (StateT ([Integer],ClassMap) (Reader Stack)) a
-
-data StackReference = Pointer RType
-                    | Variable RType LlvmVar
-                    | Function RType [RType]
-                    | Class Integer
-                    deriving (Show,Eq)
-
-type Stack = [Map String (BS.ByteString,StackReference)]
-
-type ClassMap = Map Integer (String,BS.ByteString,Map String (BS.ByteString,StackReference))
-
-resolve :: [Definition p] -> Either [CompileError p] (Map String (BS.ByteString,StackReference),ClassMap)
-resolve defs = let ((res,errs),(_,mp)) = runReader (runStateT (runWriterT (resolveBody defs)) ([0..],Map.empty)) []
-               in case errs of
-                 [] -> Right (res,mp)
-                 _ -> Left errs
-
-resolveType :: Type -> Resolver RType p
-resolveType (TypeId name) = do
-  st <- ask
-  let (t,res) = case stackLookup' name st of
-        Nothing -> ([LookupFailure name Nothing],undefined)
-        Just (_,ref) -> case ref of
-          Class n -> ([],TypeId n)
-          _ -> ([NotAClass name],undefined)
-  tell t
-  return res
-resolveType x = return $ fmap (const undefined) x -- This is a brutal hack
-
-translateType :: Type -> Compiler RType p
-translateType (TypeId name) = do
-  (_,ref) <- stackLookup Nothing name
-  case ref of
-    Class n -> return (TypeId n)
-    _ -> throwError [NotAClass name]
-translateType x = return $ fmap (const undefined) x
-    
-
-resolveDef :: Definition p -> Resolver (Map String (BS.ByteString,StackReference)) p
-resolveDef (Definition _ body _) = case body of
-  VariableDef tp names -> do
-    rtp <- resolveType tp
-    return $ Map.fromList $ map (\name -> (name,(BS.pack name,Pointer rtp))) names
-  ClassDef name args body -> do
-    rec { rbody <- local (rbody:) $ resolveBody body }
-    (uniq,mp) <- get
-    put (tail uniq,Map.insert (head uniq) (name,BS.pack name,rbody) mp)
-    return $ Map.singleton name (BS.pack name,Class (head uniq))
-  FunctionDef name rtp args body -> do
-    rtp' <- resolveType rtp
-    targs <- mapM (\(_,tp) -> resolveType tp) args
-    return $ Map.singleton name (BS.pack name,Function rtp' targs)
-  Import _ -> return Map.empty
-
-resolveBody :: [Definition p] -> Resolver (Map String (BS.ByteString,StackReference)) p
-resolveBody [] = return Map.empty
-resolveBody (def:defs) = do
-  refs1 <- resolveDef def
-  refs2 <- resolveBody defs
-  return (Map.union refs1 refs2)
-
-stackAlloc' :: String -> RType -> Stack -> Stack
-stackAlloc' name tp []     = [Map.singleton name (BS.pack name,Pointer tp)]
-stackAlloc' name tp (x:xs) = (Map.insert name (BS.pack name,Pointer tp) x):xs
-
-stackAlloc :: String -> RType -> Compiler () p
-stackAlloc name tp = modify $ \(uniq,st) -> (uniq,stackAlloc' name tp st)
-
-stackLookup' :: ConstantIdentifier -> Stack -> Maybe (BS.ByteString,StackReference)
-stackLookup' s [] = Nothing
-stackLookup' s@(ConstId _ (name:_)) (x:xs) = case Map.lookup name x of
-  Nothing -> stackLookup' s xs
-  Just ref -> Just ref
-
-stackLookup :: Maybe p -> ConstantIdentifier -> Compiler (BS.ByteString,StackReference) p
-stackLookup pos s = do
-  (_,st) <- get
-  case stackLookup' s st of
-    Nothing -> throwError [LookupFailure s pos]
-    Just res -> return res
-
-stackAdd :: Map String (BS.ByteString,StackReference) -> Compiler () p
-stackAdd refs = modify $ \(uniq,st) -> (uniq,refs:st)
-
-stackPush :: Compiler () p
-stackPush = modify $ \(uniq,st) -> (uniq,Map.empty:st)
-
-stackPop :: Compiler () p
-stackPop = modify $ \(uniq,st) -> (uniq,tail st)
-
-stackShadow :: Compiler a p -> Compiler a p
-stackShadow comp = do
-  (uniq,st) <- get
-  put (uniq,[])
-  res <- comp
-  (nuniq,_) <- get
-  put (nuniq,st)
-  return res
-
-stackPut :: String -> StackReference -> Compiler () p
-stackPut name ref = do
-  (uniq,st) <- get
-  let nst = case st of
-        [] -> [Map.singleton name (BS.pack (name++show (head uniq)),ref)]
-        x:xs -> (Map.insert name (BS.pack (name++show (head uniq)),ref) x):xs
-  put (tail uniq,nst)
-
-stackDiff :: Stack -> Stack -> [Map String (StackReference,StackReference)]
-stackDiff st1 st2 = reverse $ stackDiff' (reverse st1) (reverse st2)
-  where
-    stackDiff' :: Stack -> Stack -> [Map String (StackReference,StackReference)]
-    stackDiff' (x:xs) (y:ys) = (Map.mapMaybe id $ 
-                                Map.intersectionWith (\(_,l) (_,r) -> if l==r
-                                                                      then Nothing
-                                                                      else Just (l,r)) x y):(stackDiff' xs ys)
-    stackDiff' [] ys = []
-    stackDiff' xs [] = []
-
-{-stackDiff :: Compiler a -> Compiler (a,[Map String (StackReference,StackReference)])
-stackDiff comp = do
-  (_,st1) <- get
-  res <- comp
-  (_,st2) <- get
-  return (res,reverse $ stackDiff' (reverse st1) (reverse st2))-}
-
-newLabel :: Compiler Integer p
-newLabel = do
-  (x:xs,st) <- get
-  put (xs,st)
-  return x
-
-runCompiler :: ClassMap -> Compiler a p -> Either [CompileError p] a
-runCompiler mp c = fst $ runReader (runWriterT $ evalStateT (runErrorT c) ([0..],[])) mp
-
-mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
-mapMaybeM f xs = mapM f xs >>= return.catMaybes
-
-typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
-typeCheck expr Nothing act = return ()
-typeCheck expr (Just req@(TypeFunction TypeVoid args)) act@(TypeFunction _ eargs)
-  | args == eargs = return ()
-  | otherwise    = throwError [TypeMismatch expr act req]
-typeCheck expr (Just req) act
-  | req == act = return ()
-  | otherwise = throwError [TypeMismatch expr act req]
-
-compilePike :: [Definition p] -> Either [CompileError p] LlvmModule
+compilePike :: Show p => [Definition p] -> Either [CompileError p] LlvmModule
 compilePike defs = case resolve defs of
   Left errs -> Left errs
-  Right (st,mp) -> runCompiler mp $ do
+  Right (st,mp) -> runCompiler mp st $ do
     ((f1,aliases),f2) <- listen $ do
       alias <- generateAliases
-      stackAdd st
       funcs <- mapMaybeM (\(Definition mods x _) -> case x of
                              FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just
                              _ -> return Nothing) defs
-      stackPop
       return (funcs,alias)
     return $  LlvmModule { modComments = []
                          , modAliases = aliases
@@ -185,28 +39,14 @@ compilePike defs = case resolve defs of
                          , modFuncs = f2++f1
                          }
 
-generateAliases :: Compiler [LlvmAlias] p
-generateAliases = do
-  mp <- ask
-  mapM (\(_,(cname,int_cname,body)) -> do
-           struct <- mapMaybeM (\(_,(name,ref)) -> case ref of
-                                   Pointer tp -> do
-                                     rtp <- toLLVMType tp
-                                     return $ Just rtp
-                                   _ -> return Nothing
-                               ) (Map.toList body)
-           return (int_cname,LMStruct struct)
-       ) (Map.toList mp)
-
 compileFunction :: String -> Type -> [(String,Type)] -> [Pos Statement p] -> Compiler LlvmFunction p
 compileFunction name ret args block = do
   ret_tp <- translateType ret
   rargs <- mapM (\(name,tp) -> do
                     rtp <- translateType tp
-                    ltp <- toLLVMType rtp
-                    return (name,rtp,ltp)) args
-  decl <- genFuncDecl (BS.pack name) ret_tp [tp | (_,tp,_) <- rargs]
-  stackAdd $ Map.fromList [(argn,(BS.pack argn,Variable argtp (LMNLocalVar (BS.pack argn) ltp))) | (argn,argtp,ltp) <- rargs]
+                    return (name,rtp)) args
+  decl <- genFuncDecl (BS.pack name) ret_tp [tp | (_,tp) <- rargs]
+  stackPushFunction name ret_tp rargs
   blks <- compileBody block ret_tp
   stackPop
   return $ LlvmFunction { funcDecl = decl
@@ -215,6 +55,17 @@ compileFunction name ret args block = do
                         , funcSect = Nothing
                         , funcBody = blks
                         }
+
+compileBody :: [Pos Statement p] -> RType -> Compiler [LlvmBlock] p
+compileBody stmts rtp = do
+  blks <- compileStatements stmts []
+  return $ readyBlocks blks
+
+readyBlocks :: [LlvmBlock] -> [LlvmBlock]
+readyBlocks = reverse.fmap (\blk -> blk { blockStmts = case blockStmts blk of
+                                             [] -> [Unreachable]
+                                             _ -> reverse (blockStmts blk) 
+                                        })
 
 genFuncDecl :: BS.ByteString -> RType -> [RType] -> Compiler LlvmFunctionDecl p
 genFuncDecl name ret_tp args = do
@@ -229,16 +80,50 @@ genFuncDecl name ret_tp args = do
                             , funcAlign = Nothing
                             }
 
-compileBody :: [Pos Statement p] -> RType -> Compiler [LlvmBlock] p
-compileBody stmts rtp = do
-  (blks,nrtp) <- compileStatements stmts [] Nothing (Just rtp)
-  return $ readyBlocks blks
 
-readyBlocks :: [LlvmBlock] -> [LlvmBlock]
-readyBlocks = reverse.map (\blk -> blk { blockStmts = case blockStmts blk of
-                                            [] -> [Unreachable]
-                                            _ -> reverse (blockStmts blk) 
-                                       })
+mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
+mapMaybeM f xs = mapM f xs >>= return.catMaybes
+
+generateAliases :: Compiler [LlvmAlias] p
+generateAliases = do
+  mp <- ask
+  mapM (\cls -> do
+           struct <- mapM (\(_,tp) -> toLLVMType tp) (classVariables cls)
+           return (BS.pack $ Re.className cls,LMStruct struct)
+       ) (Map.elems mp)
+
+stackLookupM :: Maybe p -> ConstantIdentifier -> Compiler (StackReference LlvmVar,Integer) p
+stackLookupM pos i = do
+  (_,st) <- get
+  case stackLookup i st of
+    Nothing -> throwError [LookupFailure i pos]
+    Just ref -> return ref
+
+toLLVMType :: RType -> Compiler LlvmType p
+toLLVMType tp = do
+  cls <- ask
+  return $ toLLVMType' cls tp
+
+toLLVMType' :: ClassMap -> RType -> LlvmType
+toLLVMType' _ TypeInt = LMInt 32
+toLLVMType' _ TypeBool = LMInt 1
+toLLVMType' cls (TypeId n) = LMAlias $ BS.pack $ Re.className $ cls!n
+
+translateType :: Type -> Compiler RType p
+translateType (TypeId name) = do
+  (ref,_) <- stackLookupM Nothing name
+  case ref of
+    Class n -> return (TypeId n)
+    _ -> throwError [NotAClass name]
+translateType x = return $ fmap (const undefined) x
+
+compileStatements :: [Pos Statement p] -> [LlvmBlock] -> Compiler [LlvmBlock] p
+compileStatements [] blks = return blks
+compileStatements ((Pos x pos):xs) blks = do
+  nblks <- compileStatement pos x blks
+  if terminates x
+    then return nblks
+    else compileStatements xs nblks
 
 appendStatements :: [LlvmStatement] -> [LlvmBlock] -> Compiler [LlvmBlock] p
 appendStatements [] [] = return []
@@ -249,137 +134,175 @@ appendStatements stmts [] = do
                     }]
 appendStatements stmts (x:xs) = return $ x { blockStmts = stmts ++ (blockStmts x) }:xs
 
-compileStatements :: [Pos Statement p] -> [LlvmBlock] -> Maybe Integer -> Maybe RType -> Compiler ([LlvmBlock],Maybe RType) p
-compileStatements [] blks _ rtp = return (blks,rtp)
-compileStatements ((Pos x pos):xs) blks brk rtp = do
-  (stmts,nblks,nrtp) <- compileStatement pos x brk rtp
-  nblks2 <- appendStatements stmts blks
-  compileStatements xs (nblks ++ nblks2) brk nrtp
+terminates :: Statement p -> Bool
+terminates (StmtReturn _) = True
+terminates StmtBreak = True
+terminates _ = False
 
-compileStatement :: p -> Statement p -> Maybe Integer -> Maybe RType -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType) p
-compileStatement _ (StmtBlock stmts) brk rtp = do
-  stackPush
-  (blks,nrtp) <- compileStatements stmts [] brk rtp
+terminatesLLVM :: LlvmStatement -> Bool
+terminatesLLVM (Return _) = True
+terminatesLLVM (Branch _) = True
+terminatesLLVM (BranchIf _ _ _) = True
+terminatesLLVM _ = False
+
+lastBlockTerminated :: [LlvmBlock] -> Bool
+lastBlockTerminated [] = False
+lastBlockTerminated ((LlvmBlock _ stmts):_) = case stmts of
+  [] -> False
+  stmt:_ -> terminatesLLVM stmt
+
+stackPop :: Compiler () p
+stackPop = do
+  (x,st) <- get
+  case stackPop' st of
+    Just nst -> put (x,nst)
+    Nothing -> throwError [InternalError "Stack corrupt"]
+
+firstLabel :: [LlvmBlock] -> Integer
+firstLabel blks = let LlvmBlockId lbl = blockLabel (last blks) in lbl
+
+lastLabel :: [LlvmBlock] -> Integer
+lastLabel blks = let LlvmBlockId lbl = blockLabel (head blks) in lbl
+
+compileStatement :: p -> Statement p -> [LlvmBlock] -> Compiler [LlvmBlock] p
+compileStatement _ (StmtBlock stmts) cur = do
+  stackPushBlock
+  blks <- compileStatements stmts cur
   stackPop
-  return ([],blks,nrtp)
-compileStatement _ (StmtDecl name tp expr) _ rtp = do
-  tp2 <- translateType tp
-  --stackAlloc name tp2
-  rtp' <- toLLVMType tp2
+  return blks
+compileStatement _ (StmtDecl name tp expr) cur = do
+  rtp <- translateType tp
+  ltp <- toLLVMType rtp
+  stackAlloc name rtp
   case expr of
-    Nothing -> do
-      var <- defaultValue tp2
-      stackPut name (Variable tp2 var)
-      return ([],[],rtp)
+    Nothing -> return cur
     Just rexpr -> do
-      (extra,res,_) <- compileExpression' "assignment" rexpr (Just tp2)
-      stackPut name (Variable tp2 res)
-      return (extra,[],rtp)
-compileStatement _ st@(StmtReturn expr) _ rtp = case expr of
-  Nothing -> case rtp of
-    Nothing -> return ([Return Nothing],[],Just TypeVoid)
-    Just rrtp
-      | rrtp == TypeVoid -> return ([Return Nothing],[],Just TypeVoid)
-      | otherwise -> throwError [WrongReturnType st TypeVoid rrtp]
-  Just rexpr -> do
-    (extra,res,rrtp) <- compileExpression' "return value" rexpr rtp
-    return ([Return (Just res)]++extra,[],Just rrtp)
-compileStatement _ (StmtWhile cond body) _ rtp = compileWhile cond body rtp Nothing
-compileStatement pos (StmtFor e1 e2 e3 body) _ rtp = do
-  (init_stmts,init_blks,nrtp) <- case e1 of
-    Nothing -> return ([],[],rtp)
-    Just r1 -> compileStatement pos (StmtExpr r1) Nothing rtp
-  init_blks' <- appendStatements init_stmts init_blks
-  let lbl_start = case init_blks' of
-        [] -> Nothing
-        (LlvmBlock (LlvmBlockId lbl) _:_) -> Just lbl
-  (body_stmts,body_blks,nnrtp) <- compileWhile
-                                  (case e2 of
-                                      Nothing -> Pos (ExprInt 1) pos
-                                      Just r2 -> r2)    
-                                  (body++(case e3 of
-                                             Nothing -> []
-                                             Just r3 -> [Pos (StmtExpr r3) pos])) nrtp lbl_start
-  return (body_stmts,body_blks++init_blks',nnrtp)
-compileStatement _ (StmtIf expr (Pos ifTrue tpos) mel) brk rtp = do
-  lblEnd <- newLabel
-  (res,var,_) <- compileExpression' "condition" expr (Just TypeBool)
-  stackPush
-  (blksTrue,nrtp1) <- do
-    (stmts,blks,nrtp) <- compileStatement tpos ifTrue brk rtp
-    nblks <- appendStatements ([Branch (LMLocalVar lblEnd LMLabel)]++stmts) blks
-    return (nblks,nrtp)
-  stackPop
-  (blksFalse,nrtp2) <- case mel of
-    Nothing -> return ([],nrtp1)
-    Just (Pos st stpos) -> do
-      stackPush
-      (blks,nrtp) <- do
-        (stmts,blks,nnrtp) <- compileStatement stpos st brk nrtp1
-        nblks <- appendStatements ([Branch (LMLocalVar lblEnd LMLabel)]++stmts) blks
-        return (nblks,nnrtp)
-      stackPop
-      return (blks,nrtp)
-  let lblTrue = case blksTrue of
-        [] -> lblEnd
-        _  -> let LlvmBlock { blockLabel = LlvmBlockId lbl } = last blksTrue in lbl
-  let lblFalse = case blksFalse of
-        [] -> lblEnd
-        _  -> let LlvmBlock { blockLabel = LlvmBlockId lbl } = last blksFalse in lbl
-  return ([BranchIf var (LMLocalVar lblTrue LMLabel) (LMLocalVar lblFalse LMLabel)] ++ res,
-          [LlvmBlock
-          { blockLabel = LlvmBlockId lblEnd
-          , blockStmts = []
-          }]++blksFalse++blksTrue,nrtp2)
-compileStatement _ (StmtExpr expr) _ rtp = do
+      (extra,res,_) <- compileExpression' "initialization" rexpr (Just rtp)
+      stackPut name res
+      appendStatements extra cur
+compileStatement _ st@(StmtReturn expr) cur = do
+  rtp <- returnTypeM
+  case expr of
+    Nothing -> case rtp of
+      TypeVoid -> appendStatements [Return Nothing] cur
+      _ -> throwError [WrongReturnType st TypeVoid rtp]
+    Just rexpr -> do
+      (extra,res,_) <- compileExpression' "return value" rexpr (Just rtp)
+      appendStatements ([Return (Just res)]++extra) cur
+compileStatement _ (StmtWhile cond body) cur = compileWhile cond body cur
+compileStatement _ (StmtExpr expr) cur = do
   (stmts,var,_) <- compileExpression' "statement expression" expr Nothing
-  return (stmts,[],rtp)
-compileStatement _ StmtBreak Nothing _ = error "Nothing to break to"
-compileStatement _ StmtBreak (Just lbl) rtp = return ([Branch (LMLocalVar lbl LMLabel)],[],rtp)
-compileStatement _ _ _ rtp = return ([Unreachable],[],rtp)
+  appendStatements stmts cur
+compileStatement pos StmtBreak cur = do
+  (lbl,ncur) <- case cur of
+    (LlvmBlock (LlvmBlockId lbl) _):_ -> return (lbl,cur)
+    [] -> do
+      lbl <- newLabel
+      return (lbl,[LlvmBlock (LlvmBlockId lbl) []])
+  brk <- breakLabelM pos
+  (c,st) <- get
+  nst <- case stackPopTill (\st -> case st of
+                               LocalContext { localType = LoopContext {} } -> True
+                               _ -> False) st >>= stackPop' of
+           Nothing -> throwError [NothingToBreakTo pos]
+           Just b -> return b
+  let Just nst2 = addBreak lbl nst st
+  put (c,nst2)
+  appendStatements [Branch (LMLocalVar brk LMLabel)] ncur
+compileStatement _ (StmtIf expr (Pos ifTrue tpos) mel) cur = do
+  lblEnd <- newLabel
+  lblTrue <- newLabel
+  lblFalse <- case mel of
+    Just _ -> newLabel
+    Nothing -> return lblEnd
+  (res,var,_) <- compileExpression' "condition" expr (Just TypeBool)
+  ncur1 <- appendStatements ([BranchIf var (LMLocalVar lblTrue LMLabel) (LMLocalVar lblFalse LMLabel)]++res) cur
+  let ncur2 = (LlvmBlock (LlvmBlockId lblTrue) []):ncur1
+  stackPushBlock
+  ncur3 <- do
+    nblks <- compileStatement tpos ifTrue ncur2
+    if lastBlockTerminated nblks
+      then return nblks
+      else appendStatements [Branch (LMLocalVar lblEnd LMLabel)] nblks
+  stackPop
+  ncur4 <- case mel of
+    Nothing -> return ncur3
+    Just (Pos st stpos) -> do
+      stackPushBlock
+      res <- compileStatement stpos st ((LlvmBlock (LlvmBlockId lblFalse) []):ncur3)
+      stackPop
+      return res
+  return $ (LlvmBlock (LlvmBlockId lblEnd) []):ncur4
+compileStatement _ stmt _ = throwError [NotImplemented $ "Compiling "++show stmt]
 
-compileWhile :: Pos Expression p -> [Pos Statement p] -> Maybe RType -> Maybe Integer -> Compiler ([LlvmStatement],[LlvmBlock],Maybe RType) p
-compileWhile cond body rtp mlbl_start = do
-  lbl_start <- case mlbl_start of
-    Just lbl -> return lbl
-    Nothing -> newLabel
+compileWhile :: Pos Expression p -> [Pos Statement p] -> [LlvmBlock] -> Compiler [LlvmBlock] p
+compileWhile cond body cur = do
+  let ws = Set.map (\(ConstId _ (name:_)) -> name) $ writes (fmap posObj body)
+  phis <- newPhiVars ws
+  phis2 <- newPhiVars ws
+  (lbl_start,ncur) <- case cur of
+    (LlvmBlock (LlvmBlockId lbl) _):_ -> return (lbl,cur)
+    [] -> do
+      lbl <- newLabel
+      return (lbl,[LlvmBlock (LlvmBlockId lbl) []])
   lbl_test <- newLabel
   lbl_end <- newLabel
-  wvars <- mapM (\(cid@(ConstId _ (wvar:_))) -> do
-                    (_,Variable tp ref) <- stackLookup Nothing cid
-                    lbl <- newLabel
-                    rtp <- toLLVMType tp
-                    stackPut wvar (Variable tp (LMLocalVar lbl rtp))
-                    return (cid,tp,rtp,lbl,ref)
-                ) (Set.toList (writes ((StmtExpr cond):(map posObj body))))
-  (_,st) <- get
-  (loop,nrtp) <- compileStatements body [] (Just lbl_end) rtp
-  let (LlvmBlock (LlvmBlockId lbl_loop) _):_ = loop
-  nloop <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
-  phis <- mapM (\(cid,tp,rtp,lbl,ref) -> do
-                   (_,Variable _ nref) <- stackLookup Nothing cid
-                   return (Assignment
-                           (LMLocalVar lbl rtp)
-                           (Phi rtp [(ref,LMLocalVar lbl_start LMLabel),
-                                     (nref,LMLocalVar lbl_loop LMLabel)]))) wvars
-  modify (\(uniq,_) -> (uniq,st))
-  (test_stmts,test_var,_) <- compileExpression' "condition" cond (Just TypeBool)
-  return (case mlbl_start of
-             Nothing -> [Branch (LMLocalVar lbl_start LMLabel)]
-             Just _ -> [],
-          [LlvmBlock (LlvmBlockId lbl_end) []]++nloop++
-          [LlvmBlock
-           (LlvmBlockId lbl_test)
-           ([BranchIf test_var (LMLocalVar lbl_loop LMLabel) (LMLocalVar lbl_end LMLabel)] ++ test_stmts ++ phis)
-          ]++(case mlbl_start of
-              Just _ -> []
-              Nothing -> [LlvmBlock (LlvmBlockId lbl_start) [Branch (LMLocalVar lbl_test LMLabel)]])
-          ,rtp)
+  cls <- ask
+  (_,stack_start) <- get
+  let stack_test = stackUpdateVars (\name tp ref -> case Map.lookup name phis of
+                                       Nothing -> Nothing
+                                       Just i -> Just (LMLocalVar i (toLLVMType' cls tp))) stack_start
+  modify (\(count,_) -> (count,stack_test))
+  stackPushLoop lbl_start lbl_test lbl_end
+  (test_stmts,test_var,_) <- compileExpression' "loop condition" cond (Just TypeBool)
+  loop <- compileStatements body []
+  let lbl_loop_first = firstLabel loop
+      lbl_loop_last = lastLabel loop
+  nloop <- if lastBlockTerminated loop
+           then return loop
+           else appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
+  (_,LocalContext { localType = LoopContext { loopBreakpoints = brks } }) <- get
+  stackPop
+  (_,stack_end) <- get
+  modify (\(st,_) -> (st,stackUpdateVars (\name tp ref -> case Map.lookup name phis2 of
+                                                               Nothing -> Nothing
+                                                               Just i -> Just (LMLocalVar i (toLLVMType' cls tp))) stack_test))
+  
+  res1 <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] ncur
+  return $ [LlvmBlock (LlvmBlockId lbl_end) (createPhis cls phis2 ((lbl_test,stack_test):brks))]++nloop++
+    [LlvmBlock
+     (LlvmBlockId lbl_test)
+     ([BranchIf test_var (LMLocalVar lbl_loop_first LMLabel) (LMLocalVar lbl_end LMLabel)] ++ test_stmts ++
+      createPhis cls phis (if lastBlockTerminated loop
+                           then [(lbl_start,stack_start)]
+                           else [(lbl_loop_last,stack_end),(lbl_start,stack_start)]))
+    ]++res1
 
-data CompileExprResult
-     = ResultCalc [LlvmStatement] LlvmVar RType
-     | ResultClass Integer
-     deriving Show
+createPhis :: ClassMap -> Map String Integer -> [(Integer,Stack LlvmVar)] -> [LlvmStatement]
+createPhis cls mp [] = []
+createPhis cls mp st@((_,GlobalContext {}):_) = []
+createPhis cls mp st@((_,ClassContext {}):_) = createPhis cls mp (fmap (\(i,ctx) -> (i,classUpper ctx)) st)
+createPhis cls mp st@((_,LocalContext {}):_)
+  = let rmap = foldr (\(pt,ctx) p -> Map.intersectionWith (\(tp,ref) (trg,_,lst) -> (trg,tp,(pt,ref):lst)) (localVars ctx) p)
+               (fmap (\i -> (i,undefined,[])) mp) st
+    in [ Assignment (LMLocalVar trg rtp) (Phi rtp [ (mbDefault' cls tp ref,LMLocalVar lbl LMLabel)
+                                                  | (lbl,ref) <- froms])
+       | (name,(trg,tp,froms)) <- Map.toList rmap, let rtp = toLLVMType' cls tp
+       ] ++ createPhis cls mp (fmap (\(i,ctx) -> (i,localUp ctx)) st)
+
+returnTypeM :: Compiler RType p      
+returnTypeM = do
+  (_,st) <- get
+  case returnType st of
+    Nothing -> throwError [InternalError "Couldn't figure out return type"]
+    Just rtp -> return rtp
+
+breakLabelM :: p -> Compiler Integer p
+breakLabelM pos = do
+  (_,st) <- get
+  case breakLabel st of
+    Nothing -> throwError [NothingToBreakTo pos]
+    Just brk -> return brk
 
 compileExpression' :: String -> Pos Expression p -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType) p
 compileExpression' reason (Pos expr pos) rt = do
@@ -388,51 +311,37 @@ compileExpression' reason (Pos expr pos) rt = do
     ResultCalc stmts var ret -> return (stmts,var,ret)
     ResultClass n -> do
       classmap <- ask
-      let (name,_,_) = classmap!n
-      throwError [MisuseOfClass reason name]
+      throwError [MisuseOfClass reason (Re.className $ classmap!n)]
+
+data CompileExprResult
+     = ResultCalc [LlvmStatement] LlvmVar RType
+     | ResultClass Integer
+     deriving Show
 
 compileExpression :: p -> Expression p -> Maybe RType -> Compiler CompileExprResult p
-compileExpression _ (ExprInt n) tp = case tp of
-  Nothing -> do
-    rtp <- toLLVMType TypeInt
-    return $ ResultCalc [] (LMLitVar $ LMIntLit n rtp) TypeInt
-  Just rtp -> case rtp of
-    TypeInt -> return $ ResultCalc [] (LMLitVar $ LMIntLit n (LMInt 32)) TypeInt
-    TypeFloat -> return $ ResultCalc [] (LMLitVar $ LMFloatLit (fromIntegral n) LMDouble) TypeFloat
-    _ -> error $ "Ints can't have type "++show rtp
+compileExpression _ (ExprInt n) tp
+  = do 
+    let rtp = case tp of
+          Nothing -> TypeInt
+          Just t -> t
+    ttp <- toLLVMType rtp
+    lit <- case rtp of
+      TypeInt -> return $ LMIntLit n ttp
+      TypeFloat -> return $ LMFloatLit (fromIntegral n) ttp
+      _ -> throwError [TypeMismatch (ExprInt n) TypeInt rtp]
+    return $ ResultCalc [] (LMLitVar lit) rtp
 compileExpression pos e@(ExprId name) etp = do
-  (n,ref) <- stackLookup (Just pos) name
+  (ref,_) <- stackLookupM (Just pos) name
   case ref of
-    Variable tp var -> do
+    Variable tp Nothing -> throwError [UninitializedVariable pos name]
+    Variable tp (Just cont) -> do
       typeCheck e etp tp
-      return $ ResultCalc [] var tp
-    Pointer tp -> do
-      typeCheck e etp tp
-      rtp <- toLLVMType tp
-      lbl <- newLabel
-      let tvar = LMLocalVar lbl rtp
-      return $ ResultCalc [Assignment tvar (Load (LMNLocalVar n (LMPointer rtp)))] tvar tp
-    Function tp args -> do
-      typeCheck e etp (TypeFunction tp args)
-      fdecl <- genFuncDecl n tp args
-      return $ ResultCalc [] (LMGlobalVar n (LMFunction fdecl) External Nothing Nothing False) (TypeFunction tp args)
-    Class n -> return $ ResultClass n
-compileExpression pos e@(ExprAssign Assign lhs expr) etp = case lhs of
-  LVId tid -> do
-    (n,ref) <- stackLookup (Just pos) tid
-    case ref of
-      Variable tp var -> do
-        typeCheck e etp tp
-        (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
-        llvmtp <- toLLVMType tp
-        let ConstId _ (name:_) = tid
-        stackPut name (Variable tp res)
-        return $ ResultCalc extra res tp
-      Pointer ptp -> do
-        typeCheck e etp ptp
-        (extra,res,_) <- compileExpression' "assignment" expr (Just ptp)
-        llvmtp <- toLLVMType ptp
-        return $ ResultCalc ([Store res (LMNLocalVar n (LMPointer llvmtp))]++extra) res ptp
+      return $ ResultCalc [] cont tp
+    Function rtype args -> do
+      let ConstId _ (rname:_) = name
+      decl <- genFuncDecl (BS.pack rname) rtype args
+      return $ ResultCalc [] (LMGlobalVar (BS.pack rname) (LMFunction decl) Internal Nothing Nothing True) (TypeFunction rtype args)
+    _ -> throwError [NotImplemented $ "Expression result "++show ref]
 compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
   (rextra,rres,tpr) <- compileExpression' "binary expressions" rexpr (Just tpl)
@@ -447,6 +356,17 @@ compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
       llvmtp <- toLLVMType tpl
       let resvar = LMLocalVar res llvmtp
       return $ ResultCalc ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra) resvar tpl
+compileExpression pos e@(ExprAssign Assign lhs expr) etp = case lhs of
+  LVId tid -> do
+    (ref,_) <- stackLookupM (Just pos) tid
+    case ref of
+      Variable tp var -> do
+        typeCheck e etp tp
+        (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
+        llvmtp <- toLLVMType tp
+        let ConstId _ (name:_) = tid
+        stackPut name res
+        return $ ResultCalc extra res tp
 compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
   res <- compileExpression rpos expr Nothing
   case res of
@@ -461,50 +381,56 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       _ -> throwError [NotAFunction e ftp]
     ResultClass n -> do
       classmap <- ask
-      let (name,int_name,funcs) = classmap!n
+      --let (name,int_name,funcs) = classmap!n
+      let entr = classmap!n
+          int_name = BS.pack $ Re.className entr
       lbl <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
-compileExpression _ e@(ExprLambda args (Pos body body_pos)) etp = do
-  fid <- newLabel
-  let fname = BS.pack ("lambda"++show fid)
-  rargs <- mapM (\(name,tp) -> do
-                    tp' <- translateType tp
-                    ltp <- toLLVMType tp'
-                    return (name,tp',ltp)) args
-  fdecl <- genFuncDecl fname TypeInt [ tp | (_,tp,_) <- rargs]
-  let rtp = case etp of
-        Just (TypeFunction r _) -> Just r
-        _ -> Nothing
-  (blks,nrtp) <- stackShadow $ do
-    stackAdd $ Map.fromList [ (name,(BS.pack name,Variable tp (LMNLocalVar (BS.pack name) ltp))) | (name,tp,ltp) <- rargs ]
-    (stmts,blks,rtp2) <- compileStatement body_pos body Nothing rtp
-    nblks <- appendStatements stmts blks
-    return (nblks,rtp2)
-  tell $ [LlvmFunction { funcDecl = fdecl,
-                         funcArgs = map (BS.pack . fst) args,
-                         funcAttrs = [],
-                         funcSect = Nothing,
-                         funcBody = readyBlocks blks
-                       }]
-  let ftp = TypeFunction (case nrtp of
-                             Nothing -> TypeVoid
-                             Just tp -> tp) [tp | (_,tp,_) <- rargs]
-  typeCheck e etp ftp
-  return $ ResultCalc [] (LMGlobalVar fname (LMFunction fdecl) External Nothing Nothing False) ftp
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
+  
+typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
+typeCheck expr Nothing act = return ()
+typeCheck expr (Just req@(TypeFunction TypeVoid args)) act@(TypeFunction _ eargs)
+  | args == eargs = return ()
+  | otherwise    = throwError [TypeMismatch expr act req]
+typeCheck expr (Just req) act
+  | req == act = return ()
+  | otherwise = throwError [TypeMismatch expr act req]
+              
+stackPushBlock :: Compiler () p
+stackPushBlock = modify (\(n,st) -> (n,LocalContext st Map.empty BlockContext))
 
+stackPushLoop :: Integer -> Integer -> Integer -> Compiler () p
+stackPushLoop test start end = modify $ \(n,st) -> (n,LocalContext st Map.empty (LoopContext test start end []))
 
-toLLVMType :: RType -> Compiler LlvmType p
-toLLVMType TypeInt = return $ LMInt 32
-toLLVMType TypeBool = return $ LMInt 1
-toLLVMType (TypeId n) = do
-  cls <- ask
-  let (_,int_name,_) = cls!n
-  return (LMAlias int_name)
+stackPushFunction :: String -> RType -> [(String,RType)] -> Compiler () p
+stackPushFunction name rtype args = do
+  vars <- mapM (\(n,tp) -> do
+                   rtp <- toLLVMType tp
+                   return (n,tp,LMNLocalVar (BS.pack n) rtp)
+               ) args
+  modify $ \(n,st) -> (n,LocalContext st Map.empty (FunctionContext name rtype vars))
 
-defaultValue :: RType -> Compiler LlvmVar p
-defaultValue TypeInt = return (LMLitVar (LMIntLit 0 (LMInt 32)))
+stackAlloc :: String -> RType -> Compiler () p
+stackAlloc name tp = modify $ \(n,st) -> (n,stackAllocVar name tp st)
+
+stackPut :: String -> LlvmVar -> Compiler () p
+stackPut name cont = do
+  (n,st) <- get
+  case stackUpdateVar name cont st of
+    Nothing -> throwError [InternalError $ "Variable "++name++" couldn't be updated"]
+    Just nst -> put (n,nst)
+
+mbDefault :: RType -> Maybe LlvmVar -> Compiler LlvmVar p
+mbDefault _ (Just var) = return var
+mbDefault TypeInt Nothing = do
+  rtp <- toLLVMType TypeInt
+  return $ LMLitVar (LMIntLit 0 rtp)
+
+mbDefault' :: ClassMap -> RType -> Maybe LlvmVar -> LlvmVar
+mbDefault' _ _ (Just var) = var
+mbDefault' cm TypeInt Nothing = LMLitVar (LMIntLit 0 (toLLVMType' cm TypeInt))
 
 writes :: [Statement p] -> Set ConstantIdentifier
 writes xs = writes' xs Set.empty
@@ -514,7 +440,7 @@ writes xs = writes' xs Set.empty
     writes' (x:xs) s = writes' xs (writes'' x s)
 
     writes'' :: Statement p -> Set ConstantIdentifier -> Set ConstantIdentifier
-    writes'' (StmtBlock stmts) s = writes' (map posObj stmts) s
+    writes'' (StmtBlock stmts) s = writes' (fmap posObj stmts) s
     writes'' (StmtExpr expr) s = writes''' (posObj expr) s
     writes'' (StmtDecl name _ (Just expr)) s = writes''' (posObj expr) (Set.insert (ConstId False [name]) s)
     writes'' (StmtIf cond (Pos ifTrue _) ifFalse) s = writes''' (posObj cond) (writes'' ifTrue (case ifFalse of
@@ -530,16 +456,22 @@ writes xs = writes' xs Set.empty
                                                  s3 = case it of
                                                    Nothing -> s2
                                                    Just (Pos r3 _) -> writes''' r3 s2
-                                             in writes' (map posObj body) s3
+                                             in writes' (fmap posObj body) s3
     writes'' _ s = s
     
     writes''' :: Expression p -> Set ConstantIdentifier -> Set ConstantIdentifier
     writes''' (ExprAssign _ lhs (Pos rhs _)) s = case lhs of
                                                       LVId tid -> writes''' rhs (Set.insert tid s)
                                                       _ -> writes''' rhs s
-    writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (map posObj (cmd:args))
+    writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (fmap posObj (cmd:args))
     writes''' (ExprBin _ (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' lhs s)
     writes''' (ExprIndex (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' rhs s)
     writes''' (ExprLambda _ (Pos stmt _)) s = writes'' stmt s
     writes''' _ s = s
 
+newPhiVars :: Ord a => Set a -> Compiler (Map a Integer) p
+newPhiVars vars = do
+  res <- mapM (\var -> do
+                  lbl <- newLabel
+                  return (var,lbl)) (Set.toAscList vars)
+  return $ Map.fromAscList res

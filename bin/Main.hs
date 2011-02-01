@@ -58,7 +58,7 @@ main = do
     putStr usage
     exitSuccess
   when (showVersion opts) $ do
-    putStrLn $ "hike "++VERSION
+    putStrLn $ "hike compiler "++show VERSION
     exitSuccess
   case args of
     [] -> putStr usage

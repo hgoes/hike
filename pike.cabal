@@ -13,14 +13,17 @@ Library
     Language.Pike.Syntax
     Language.Pike.Parser
     Language.Pike.Compiler
-    Language.Pike.CompileError
+    Language.Pike.Compiler.Stack
+    Language.Pike.Compiler.Error
+    Language.Pike.Compiler.Resolver
+    Language.Pike.Compiler.Monad
 
     Llvm
     Llvm.AbsSyn
     Llvm.PpLlvm
     Llvm.Types
 
-Executable hike:
+Executable hike
   Build-Depends:       language-pike,process,filepath,base,bytestring
   Hs-Source-Dirs:      bin
   Main-Is:             Main.hs

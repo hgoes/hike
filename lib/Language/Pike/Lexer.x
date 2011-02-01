@@ -3,7 +3,7 @@ module Language.Pike.Lexer where
 
 import Language.Pike.Tokens
 import Data.ByteString.Lazy.Char8 as LBS
-import Language.Pike.CompileError
+import Language.Pike.Compiler.Error
 import Control.Monad.State.Strict
 import Control.Monad.Error
 
