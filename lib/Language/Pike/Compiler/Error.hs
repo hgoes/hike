@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleInstances #-}
-module Language.Pike.CompileError where
+module Language.Pike.Compiler.Error where
 
 import Language.Pike.Tokens
 import Control.Monad.Error
@@ -17,6 +17,11 @@ data CompileError p
   | LookupFailure ConstantIdentifier (Maybe p)
   | NotAClass ConstantIdentifier
   | MisuseOfClass String String
+  | NotImplemented String
+  | ImportInsideClass
+  | InternalError String
+  | UninitializedVariable p ConstantIdentifier
+  | NothingToBreakTo p
 
 instance Error (CompileError p) where
   noMsg = GenericError "unknown error"
@@ -40,3 +45,8 @@ instance Show p => Show (CompileError p) where
                                                                           Nothing -> "")
     show (NotAClass name) = show name ++ " is not a class"
     show (MisuseOfClass reason name) = "a class ("++name++") cannot be used for "++reason
+    show (NotImplemented what) = "The following feature is yet unimplemented: "++what
+    show ImportInsideClass = "Import definitions inside classes are not allowed"
+    show (InternalError str) = "Internal compiler error: "++str
+    show (UninitializedVariable pos var) = "Variable "++show var++" is used unintialized at "++show pos
+    show (NothingToBreakTo pos) = "Nothing to break to at "++show pos
