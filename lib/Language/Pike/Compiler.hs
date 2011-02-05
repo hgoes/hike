@@ -341,6 +341,7 @@ compileExpression pos e@(ExprId name) etp = do
       let ConstId _ (rname:_) = name
       decl <- genFuncDecl (BS.pack rname) rtype args
       return $ ResultCalc [] (LMGlobalVar (BS.pack rname) (LMFunction decl) Internal Nothing Nothing True) (TypeFunction rtype args)
+    Class i -> return $ ResultClass i
     _ -> throwError [NotImplemented $ "Expression result "++show ref]
 compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
