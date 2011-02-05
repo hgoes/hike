@@ -357,17 +357,25 @@ compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
       llvmtp <- toLLVMType tpl
       let resvar = LMLocalVar res llvmtp
       return $ ResultCalc ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra) resvar tpl
-compileExpression pos e@(ExprAssign Assign lhs expr) etp = case lhs of
-  LVId tid -> do
-    (ref,_) <- stackLookupM (Just pos) tid
-    case ref of
-      Variable tp var -> do
-        typeCheck e etp tp
-        (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
-        llvmtp <- toLLVMType tp
-        let ConstId _ (name:_) = tid
-        stackPut name res
-        return $ ResultCalc extra res tp
+compileExpression pos e@(ExprAssign Assign lhs expr) etp = do
+  (var,idx,inner_tp,tp,ri) <- resolveLHS pos lhs
+  typeCheck e etp tp
+  (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
+  llvmtp <- toLLVMType tp
+  case idx of
+    [] -> do
+      let ConstId _ (name:_) = ri
+      stackPut name res
+      return $ ResultCalc extra res tp
+    _ -> case var of
+      Nothing -> throwError [UninitializedVariable pos ri]
+      Just rvar -> do
+        tmp <- newLabel
+        let tmpvar = LMLocalVar tmp (LMPointer llvmtp)
+        return $ ResultCalc ([Store res tmpvar
+                             ,Assignment tmpvar
+                              (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- 0:idx])
+                             ]++extra) res tp
 compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
   res <- compileExpression rpos expr Nothing
   case res of
@@ -390,6 +398,21 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
+resolveLHS :: p -> LValue -> Compiler (Maybe LlvmVar,[Integer],RType,RType,ConstantIdentifier) p
+resolveLHS pos (LVId ci) = do
+  (ref,_) <- stackLookupM (Just pos) ci
+  case ref of
+    Variable tp var -> return (var,[],tp,tp,ci)
+resolveLHS pos (LVAccess lhs name) = do 
+  (var,idx,inner,tp,ri) <- resolveLHS pos lhs
+  case tp of
+    TypeId cid -> do
+      classmap <- ask
+      let entr = classmap!cid
+      case lookupWithIndex name (classVariables entr) of
+        Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
+        Just (rtp,i) -> return (var,i:idx,inner,rtp,ri)
+
 typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
 typeCheck expr Nothing act = return ()
 typeCheck expr (Just req@(TypeFunction TypeVoid args)) act@(TypeFunction _ eargs)
@@ -476,3 +499,11 @@ newPhiVars vars = do
                   lbl <- newLabel
                   return (var,lbl)) (Set.toAscList vars)
   return $ Map.fromAscList res
+
+lookupWithIndex :: Eq a => a -> [(a,b)] -> Maybe (b,Integer)
+lookupWithIndex = lookupIndex' 0
+  where
+    lookupIndex' n el []     = Nothing
+    lookupIndex' n el ((x,cur):xs) = if el == x
+                                     then Just (cur,n)
+                                     else lookupIndex' (n+1) el xs

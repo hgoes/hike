@@ -22,6 +22,7 @@ data CompileError p
   | InternalError String
   | UninitializedVariable p ConstantIdentifier
   | NothingToBreakTo p
+  | NoSuchMember p String String
 
 instance Error (CompileError p) where
   noMsg = GenericError "unknown error"
@@ -50,3 +51,4 @@ instance Show p => Show (CompileError p) where
     show (InternalError str) = "Internal compiler error: "++str
     show (UninitializedVariable pos var) = "Variable "++show var++" is used unintialized at "++show pos
     show (NothingToBreakTo pos) = "Nothing to break to at "++show pos
+    show (NoSuchMember pos cls name) = "class "++cls++" has no member "++name++" at "++show pos
