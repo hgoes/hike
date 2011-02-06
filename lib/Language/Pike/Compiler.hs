@@ -386,6 +386,25 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       lbl <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
+compileExpression pos e@(ExprAccess expr name) etp = do
+  (extra,rvar,tp) <- compileExpression' "accessor" expr Nothing
+  case tp of
+    TypeId cid -> do
+      classmap <- ask
+      let entr = classmap!cid
+      case lookupWithIndex name (classVariables entr) of
+        Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
+        Just (rtp,idx) -> do
+          typeCheck e etp rtp
+          tmp <- newLabel
+          tmptp <- toLLVMType rtp
+          rlbl <- newLabel
+          let tmpvar = LMLocalVar tmp (LMPointer tmptp)
+              resvar = LMLocalVar rlbl tmptp
+          return $ ResultCalc ([Assignment resvar (Load tmpvar)
+                               ,Assignment tmpvar
+                                (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                               ]++extra) resvar rtp
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
 
