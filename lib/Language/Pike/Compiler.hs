@@ -29,15 +29,50 @@ compilePike defs = case resolve defs of
     ((f1,aliases),f2) <- listen $ do
       alias <- generateAliases
       funcs <- mapMaybeM (\(Definition mods x _) -> case x of
-                             FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just
+                             FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just.(\x -> [x])
+                             ClassDef name args cdefs -> compileClass (TypeId (ConstId False [name])) name args cdefs >>= return.Just
                              _ -> return Nothing) defs
-      return (funcs,alias)
+      return (concat funcs,alias)
     return $  LlvmModule { modComments = []
                          , modAliases = aliases
                          , modGlobals = []
                          , modFwdDecls = []
                          , modFuncs = f2++f1
                          }
+
+compileClass :: Type -> String -> [(String,Type)] -> [Definition p] -> Compiler [LlvmFunction] p
+compileClass ctype cname _ cdefs = do
+  let rname = ConstId False [cname]
+  (ref,_) <- stackLookupM Nothing rname
+  cid <- case ref of
+    Class n -> return n
+    _ -> throwError [NotAClass rname]
+  stackPushClass cid
+  res <- mapMaybeM (\(Definition mods x _) -> case x of
+                      FunctionDef name ret args block -> compileMethod ctype cname name ret args block >>= return.Just.(\x -> [x])
+                      _ -> return Nothing) cdefs
+  stackPop
+  return (concat res)
+
+compileMethod :: Type -> String -> String -> Type -> [(String,Type)] -> [Pos Statement p] -> Compiler LlvmFunction p
+compileMethod ctype cname name ret args block = do
+  ctp <- translateType ctype
+  llvm_ctp <- toLLVMType ctp
+  ret_tp <- translateType ret
+  rargs <- mapM (\(name,tp) -> do
+                   rtp <- translateType tp
+                   return (name,rtp)) args
+  decl <- genFuncDecl (BS.pack $ cname ++ "__" ++ name) ret_tp (ctp:[tp | (_,tp) <- rargs])
+  let this = LMNLocalVar (BS.pack "this") llvm_ctp
+  stackPushMethod name ret_tp rargs this
+  blks <- compileBody block ret_tp
+  stackPop
+  return $ LlvmFunction { funcDecl = decl
+                        , funcArgs = (BS.pack "this"):[BS.pack name | (name,tp) <- args]
+                        , funcAttrs = [GC "shadow-stack"]
+                        , funcSect = Nothing
+                        , funcBody = blks
+                        }
 
 compileFunction :: String -> Type -> [(String,Type)] -> [Pos Statement p] -> Compiler LlvmFunction p
 compileFunction name ret args block = do
@@ -107,7 +142,7 @@ toLLVMType tp = do
 toLLVMType' :: ClassMap -> RType -> LlvmType
 toLLVMType' _ TypeInt = LMInt 32
 toLLVMType' _ TypeBool = LMInt 1
-toLLVMType' cls (TypeId n) = LMAlias $ BS.pack $ Re.className $ cls!n
+toLLVMType' cls (TypeId n) = LMPointer $ LMAlias $ BS.pack $ Re.className $ cls!n
 
 translateType :: Type -> Compiler RType p
 translateType (TypeId name) = do
@@ -315,6 +350,7 @@ compileExpression' reason (Pos expr pos) rt = do
 
 data CompileExprResult
      = ResultCalc [LlvmStatement] LlvmVar RType
+     | ResultMethod [LlvmStatement] LlvmVar LlvmVar RType [RType]
      | ResultClass Integer
      deriving Show
 
@@ -342,6 +378,17 @@ compileExpression pos e@(ExprId name) etp = do
       decl <- genFuncDecl (BS.pack rname) rtype args
       return $ ResultCalc [] (LMGlobalVar (BS.pack rname) (LMFunction decl) Internal Nothing Nothing True) (TypeFunction rtype args)
     Class i -> return $ ResultClass i
+    ClassMember this tp idx -> do
+      typeCheck e etp tp
+      tmp <- newLabel
+      tmptp <- toLLVMType tp
+      rlbl <- newLabel
+      let tmpvar = LMLocalVar tmp (LMPointer tmptp)
+          rvar = LMLocalVar rlbl tmptp
+      return $ ResultCalc [Assignment rvar (Load tmpvar)
+                          ,Assignment tmpvar
+                           (GetElemPtr True this [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                          ] rvar tp
     _ -> throwError [NotImplemented $ "Expression result "++show ref]
 compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
@@ -386,6 +433,13 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       lbl <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
+    ResultMethod eStmts fvar this rtp argtp
+      | (length argtp) == (length args) -> do
+        rargs <- zipWithM (\arg tp -> compileExpression' "method argument" arg (Just tp)) args argtp
+        res <- newLabel
+        resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
+        return $ ResultCalc ([Assignment resvar (Call StdCall fvar (this:[ v | (_,v,_) <- rargs ]) [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
+      | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
 compileExpression pos e@(ExprAccess expr name) etp = do
   (extra,rvar,tp) <- compileExpression' "accessor" expr Nothing
   case tp of
@@ -393,7 +447,12 @@ compileExpression pos e@(ExprAccess expr name) etp = do
       classmap <- ask
       let entr = classmap!cid
       case lookupWithIndex name (classVariables entr) of
-        Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
+        Nothing -> case Map.lookup name (Re.classMethods entr) of
+          Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
+          Just (rtp,args) -> do
+            let fname = (BS.pack $ (Re.className entr) ++ "__" ++ name)
+            decl <- genFuncDecl fname rtp (tp:args)
+            return $ ResultMethod extra (LMGlobalVar fname (LMFunction decl) Internal Nothing Nothing False) rvar rtp args
         Just (rtp,idx) -> do
           typeCheck e etp rtp
           tmp <- newLabel
@@ -459,6 +518,20 @@ stackPushFunction name rtype args = do
                ) args
   modify $ \(n,st) -> (n,LocalContext st Map.empty (FunctionContext name rtype vars))
 
+stackPushMethod :: String -> RType -> [(String,RType)] -> LlvmVar -> Compiler () p
+stackPushMethod name rtype args this = do
+  vars <- mapM (\(n,tp) -> do
+                   rtp <- toLLVMType tp
+                   return (n,tp,LMNLocalVar (BS.pack n) rtp)
+               ) args
+  modify $ \(n,st) -> (n,LocalContext st Map.empty (MethodContext name this rtype vars))
+
+stackPushClass :: Integer -> Compiler () p
+stackPushClass cid = do
+  classmap <- ask
+  let entr = classmap!cid
+  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid (Re.classVariables entr) (Re.classMethods entr) (Re.classInners entr) st)
+
 stackAlloc :: String -> RType -> Compiler () p
 stackAlloc name tp = modify $ \(n,st) -> (n,stackAllocVar name tp st)
 
@@ -522,11 +595,3 @@ newPhiVars vars = do
                   lbl <- newLabel
                   return (var,lbl)) (Set.toAscList vars)
   return $ Map.fromAscList res
-
-lookupWithIndex :: Eq a => a -> [(a,b)] -> Maybe (b,Integer)
-lookupWithIndex = lookupIndex' 0
-  where
-    lookupIndex' n el []     = Nothing
-    lookupIndex' n el ((x,cur):xs) = if el == x
-                                     then Just (cur,n)
-                                     else lookupIndex' (n+1) el xs

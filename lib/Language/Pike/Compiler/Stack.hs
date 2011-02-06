@@ -7,7 +7,7 @@ import Data.List (find)
 data StackReference ref = Variable RType (Maybe ref)
                         | GlobalVariable RType String
                         | Class Integer
-                        | ClassMember Integer RType Integer
+                        | ClassMember ref RType Integer
                         | Function RType [RType]
                         | ClassMethod Integer RType [RType]
                         deriving Show
@@ -36,6 +36,12 @@ data LocalType ref = FunctionContext
                      { functionName       :: String
                      , functionReturnType :: RType
                      , functionArgs       :: [(String,RType,ref)]
+                     }
+                   | MethodContext
+                     { methodName       :: String
+                     , methodThis       :: ref
+                     , methodReturnType :: RType
+                     , methodArgs       :: [(String,RType,ref)]
                      }
                    | LoopContext
                      { loopTest        :: Integer
@@ -87,6 +93,11 @@ stackUpdateVars f ctx@(LocalContext { localUp = up
                                                                                                                      Nothing -> ref
                                                                                                                      Just nref -> nref)
                                                                                               ) (functionArgs tp) }
+                                               MethodContext {} -> tp { methodArgs = fmap (\(name,tp,ref) -> (name,tp,case f name tp (Just ref) of
+                                                                                                               Nothing -> ref
+                                                                                                               Just nref -> nref)
+                                                                                         ) (functionArgs tp)
+                                                                     }
                                                _ -> tp
                                              }
 
@@ -107,7 +118,7 @@ stackLookup' name (ClassContext { classId = i
                                 , classClasses = cls
                                 , classUpper = up
                                 }) = case findWithIndex (\(n,_) -> n == name) vars of
-  Just ((_,tp),idx) -> Just (ClassMember i tp idx,0)
+  Just ((_,tp),idx) -> error "This should never be called" --Just (ClassMember i tp idx,0)
   Nothing -> case Map.lookup name funcs of
     Just (ret,args) -> Just (ClassMethod i ret args,0)
     Nothing -> case Map.lookup name cls of
@@ -120,6 +131,12 @@ stackLookup' name (LocalContext { localUp = up
   FunctionContext { functionArgs = args } -> case find (\(n,_,_) -> n == name) args of
     Just (_,tp,v) -> Just (Variable tp (Just v),0)
     Nothing -> rest
+  MethodContext { methodArgs = args 
+                , methodThis = this} -> case find (\(n,_,_) -> n == name) args of
+    Just (_,tp,v) -> Just (Variable tp (Just v),0)
+    Nothing -> case lookupWithIndex name (classMembers up) of
+      Just (mtp,idx) -> Just (ClassMember this mtp idx,0)
+      Nothing -> rest
   _ -> rest
   where
     rest = case Map.lookup name vars of
@@ -175,6 +192,7 @@ returnType (LocalContext { localUp = up
                          , localType = tp
                          }) = case tp of
   FunctionContext { functionReturnType = rtp } -> Just rtp
+  MethodContext { methodReturnType = rtp } -> Just rtp
   _ -> returnType up
 
 breakLabel :: Stack r -> Maybe Integer
@@ -185,3 +203,11 @@ breakLabel (LocalContext { localUp = up
                          }) = case tp of
   LoopContext { loopBreak = lbl } -> Just lbl
   _ -> breakLabel up
+
+lookupWithIndex :: Eq a => a -> [(a,b)] -> Maybe (b,Integer)
+lookupWithIndex = lookupIndex' 0
+  where
+    lookupIndex' n el []     = Nothing
+    lookupIndex' n el ((x,cur):xs) = if el == x
+                                     then Just (cur,n)
+                                     else lookupIndex' (n+1) el xs
