@@ -64,7 +64,7 @@ data Statement p
 
 data Expression p
     = ExprId ConstantIdentifier
-    | ExprAssign AssignType LValue (Pos Expression p)
+    | ExprAssign AssignType (Pos Expression p) (Pos Expression p)
     | ExprCall (Pos Expression p) [Pos Expression p]
     | ExprString String
     | ExprInt Integer

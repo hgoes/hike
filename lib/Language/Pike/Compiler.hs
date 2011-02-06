@@ -358,24 +358,14 @@ compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
       let resvar = LMLocalVar res llvmtp
       return $ ResultCalc ([Assignment resvar (LlvmOp LM_MO_Add lres rres)]++rextra++lextra) resvar tpl
 compileExpression pos e@(ExprAssign Assign lhs expr) etp = do
-  (var,idx,inner_tp,tp,ri) <- resolveLHS pos lhs
-  typeCheck e etp tp
-  (extra,res,_) <- compileExpression' "assignment" expr (Just tp)
-  llvmtp <- toLLVMType tp
-  case idx of
-    [] -> do
-      let ConstId _ (name:_) = ri
-      stackPut name res
-      return $ ResultCalc extra res tp
-    _ -> case var of
-      Nothing -> throwError [UninitializedVariable pos ri]
-      Just rvar -> do
-        tmp <- newLabel
-        let tmpvar = LMLocalVar tmp (LMPointer llvmtp)
-        return $ ResultCalc ([Store res tmpvar
-                             ,Assignment tmpvar
-                              (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- 0:idx])
-                             ]++extra) res tp
+  (res,tp) <- compileAssign (position lhs) (posObj lhs)
+  (extra,rvar,_) <- compileExpression' "assignment" expr (Just tp)
+  case res of
+    Left (name,_) -> do
+      stackPut name rvar
+      return $ ResultCalc extra rvar tp
+    Right (tmpvar,stmts) -> do
+      return $ ResultCalc ([Store rvar tmpvar]++stmts++extra) rvar tp
 compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
   res <- compileExpression rpos expr Nothing
   case res of
@@ -398,20 +388,34 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
-resolveLHS :: p -> LValue -> Compiler (Maybe LlvmVar,[Integer],RType,RType,ConstantIdentifier) p
-resolveLHS pos (LVId ci) = do
-  (ref,_) <- stackLookupM (Just pos) ci
+
+compileAssign :: p -> Expression p -> Compiler (Either (String,Maybe LlvmVar) (LlvmVar,[LlvmStatement]),RType) p
+compileAssign pos (ExprId cid) = do
+  (ref,_) <- stackLookupM (Just pos) cid
   case ref of
-    Variable tp var -> return (var,[],tp,tp,ci)
-resolveLHS pos (LVAccess lhs name) = do 
-  (var,idx,inner,tp,ri) <- resolveLHS pos lhs
-  case tp of
+    Variable tp var -> do
+      let ConstId _ (name:_) = cid
+      return (Left (name,var),tp)
+compileAssign pos (ExprAccess expr name) = do
+  (res,rtp) <- compileAssign (position expr) (posObj expr)
+  (cvar,stmts) <- case res of
+    Left (name,var) -> case var of
+      Just rvar -> return (rvar,[])
+      Nothing -> throwError [UninitializedVariable pos (ConstId False [name])]
+    Right r -> return r
+  case rtp of
     TypeId cid -> do
       classmap <- ask
       let entr = classmap!cid
       case lookupWithIndex name (classVariables entr) of
         Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
-        Just (rtp,i) -> return (var,i:idx,inner,rtp,ri)
+        Just (ntp,idx) -> do
+          tmp <- newLabel
+          tmptp <- toLLVMType ntp
+          let tmpvar = LMLocalVar tmp (LMPointer tmptp)
+          return (Right (tmpvar,[Assignment tmpvar
+                                 (GetElemPtr True cvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                                ]++stmts),ntp)
 
 typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
 typeCheck expr Nothing act = return ()
@@ -484,8 +488,8 @@ writes xs = writes' xs Set.empty
     writes'' _ s = s
     
     writes''' :: Expression p -> Set ConstantIdentifier -> Set ConstantIdentifier
-    writes''' (ExprAssign _ lhs (Pos rhs _)) s = case lhs of
-                                                      LVId tid -> writes''' rhs (Set.insert tid s)
+    writes''' (ExprAssign _ lhs (Pos rhs _)) s = case posObj lhs of
+                                                      ExprId tid -> writes''' rhs (Set.insert tid s)
                                                       _ -> writes''' rhs s
     writes''' (ExprCall cmd args) s = foldl (\s' e -> writes''' e s') s (fmap posObj (cmd:args))
     writes''' (ExprBin _ (Pos lhs _) (Pos rhs _)) s = writes''' rhs (writes''' lhs s)

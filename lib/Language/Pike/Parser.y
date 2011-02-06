@@ -132,22 +132,30 @@ Statement1NP : "{" Statements "}"                                               
 ExpressionE : Expression { $1 }
             | error      {%^ expected "expression" }
 
-Expression : ExpressionNP {% do { pos <- getPos ; return $ Pos $1 pos } }
+--Expression : ExpressionNP {% do { pos <- getPos ; return $ Pos $1 pos } }
 
-ExpressionNP : ConstantIdentifier                    { ExprId $1 }
-             | Expression "(" ExprList ")"           { ExprCall $1 $3 }
-             | const_string                          { ExprString $1 }
-             | const_int                             { ExprInt $1 }
-             | Expression "+" Expression             { ExprBin BinPlus $1 $3 }
-             | Expression "==" Expression            { ExprBin BinEqual $1 $3 }
-             | Expression "->" identifier            { ExprAccess $1 $3 }
-             | Expression "<" Expression             { ExprBin BinLess $1 $3 }
-             | LValue "=" Expression                 { ExprAssign Assign $1 $3 }
-             | Expression "[" Expression "]"         { ExprIndex $1 $3 }
-             | "lambda" "(" Arguments ")" Statement  { ExprLambda $3 $5 }
+Expression : ExpressionAssign { $1 }
 
-LValue : ConstantIdentifier     { LVId $1 }
-       | LValue "->" identifier { LVAccess $1 $3 }
+ExpressionAssign : LValue "=" ExpressionAssign {% positional $ ExprAssign Assign $1 $3 }
+                 | ExpressionOp                { $1 }
+
+ExpressionOp : ExpressionSimple "+" ExpressionOp     {% positional $ ExprBin BinPlus $1 $3 }
+             | ExpressionSimple "==" ExpressionOp    {% positional $ ExprBin BinEqual $1 $3 }
+             | ExpressionSimple "<" ExpressionOp     {% positional $ ExprBin BinLess $1 $3 }
+             | ExpressionSimple                      { $1 }
+
+ExpressionSimple : ConstantIdentifier                    {% positional $ ExprId $1 }
+                 | ExpressionSimple "(" ExprList ")"     {% positional $ ExprCall $1 $3 }
+                 | const_string                          {% positional $ ExprString $1 }
+                 | const_int                             {% positional $ ExprInt $1 }
+                 | ExpressionSimple "->" identifier      {% positional $ ExprAccess $1 $3 }
+                 | ExpressionSimple "[" Expression "]"   {% positional $ ExprIndex $1 $3 }
+                 | "lambda" "(" Arguments ")" Statement  {% positional $ ExprLambda $3 $5 }
+
+LValue : ExpressionSimple { $1 }
+--LValue : ConstantIdentifier     { LVId $1 }
+--       | LValue "->" identifier { LVAccess $1 $3 }
+
 
 ExpressionOpt : Expression { Just $1 }
               |            { Nothing }
@@ -169,5 +177,10 @@ expected :: String -> Token -> Lexer a
 expected tp tok = do
   (l,c) <- getPos
   throwError (Expected tp tok l c)
+
+--positional :: a -> Lexer (Pos a
+positional x = do
+  p <- getPos
+  return $ Pos x p
 }
 
