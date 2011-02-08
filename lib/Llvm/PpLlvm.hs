@@ -253,10 +253,8 @@ ppCast :: LlvmCastOp -> LlvmVar -> LlvmType -> Doc
 ppCast op from to = texts op <+> texts from <+> text "to" <+> texts to
 
 
-ppMalloc :: LlvmType -> Int -> Doc
-ppMalloc tp amount =
-  let amount' = LMLitVar $ LMIntLit (toInteger amount) i32
-  in text "malloc" <+> texts tp <> comma <+> texts amount'
+ppMalloc :: LlvmType -> LlvmVar -> Doc
+ppMalloc tp amount = text "malloc" <+> texts tp <> comma <+> texts amount
 
 
 ppAlloca :: LlvmType -> Int -> Doc

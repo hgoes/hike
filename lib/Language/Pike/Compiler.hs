@@ -432,7 +432,7 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
           int_name = BS.pack $ Re.className entr
       lbl <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
-      return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) 1)] resvar (TypeId n)
+      return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))] resvar (TypeId n)
     ResultMethod eStmts fvar this rtp argtp
       | (length argtp) == (length args) -> do
         rargs <- zipWithM (\arg tp -> compileExpression' "method argument" arg (Just tp)) args argtp
@@ -487,18 +487,19 @@ compileExpression pos e@(ExprArray elems) etp = do
       Just tp -> throwError [TypeMismatch e (TypeArray tp) (let Just etp' = etp in etp')]
       Nothing -> throwError [TypeMismatch e (TypeArray TypeVoid) (let Just etp' = etp in etp')]
     Just (Just tp) -> return tp
-  res_lbl <- newLabel
   res_tp <- toLLVMType rel_tp
-  let rvar = LMLocalVar res_lbl (LMPointer res_tp)
+  {-res_lbl <- newLabel
+  let rvar = LMLocalVar res_lbl (LMPointer res_tp)-}
+  (rvar,alloc) <- sizedArrayMalloc (LMInt 32) res_tp (LMLitVar $ LMIntLit (fromIntegral $ length elems) (LMInt 32))
   args <- mapM (\(el,i) -> do
                   (stmts,resvar,_) <- compileExpression' "array element" el (Just rel_tp)
                   tmp_lbl <- newLabel
                   let tmp_var = LMLocalVar tmp_lbl (LMPointer res_tp)
                   return $ [Store resvar tmp_var
-                           ,Assignment tmp_var (GetElemPtr True rvar [LMLitVar (LMIntLit i (LMInt 32))])
+                           ,Assignment tmp_var (GetElemPtr True rvar [LMLitVar (LMIntLit idx (LMInt 32)) | idx <- [0,1,i]])
                            ]++stmts
               ) (zip elems [0..])
-  return $ ResultCalc ((concat args) ++ [Assignment rvar (Malloc res_tp (length elems))]) rvar (TypeArray rel_tp)
+  return $ ResultCalc ((concat args) ++ alloc) rvar (TypeArray rel_tp)
 compileExpression pos e@(ExprIndex expr idx) etp = do  
   (stmts_expr,resvar_expr,tp_expr) <- compileExpression' "indexed expression" expr Nothing
   (stmts_idx,resvar_idx,_) <- compileExpression' "index expression" idx (Just TypeInt)
@@ -511,7 +512,9 @@ compileExpression pos e@(ExprIndex expr idx) etp = do
       let tmp_var = LMLocalVar tmp_lbl (LMPointer rtp_llvm)
           res_var = LMLocalVar res_lbl rtp_llvm
       return $ ResultCalc ([Assignment res_var (Load tmp_var)
-                           ,Assignment tmp_var (GetElemPtr False resvar_expr [resvar_idx])
+                           ,Assignment tmp_var (GetElemPtr False resvar_expr [LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                             ,LMLitVar (LMIntLit 1 (LMInt 32))
+                                                                             ,resvar_idx])
                            ]++stmts_idx++stmts_expr) res_var rtp
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
@@ -544,6 +547,31 @@ compileAssign pos (ExprAccess expr name) = do
           return (Right (tmpvar,[Assignment tmpvar
                                  (GetElemPtr True cvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
                                 ]++stmts),ntp)
+
+sizedArrayMalloc :: LlvmType -> LlvmType -> LlvmVar -> Compiler (LlvmVar,[LlvmStatement]) p
+sizedArrayMalloc idx_tp el_tp len_var = do
+  let tp = LMStruct [idx_tp,LMArray 0 el_tp]
+  size_lbl <- newLabel
+  sizeu_lbl <- newLabel
+  ptr_lbl <- newLabel
+  res_lbl <- newLabel
+  arrlen_lbl <- newLabel
+  let size_var = LMLocalVar size_lbl (LMPointer el_tp)
+      sizeu_var = LMLocalVar sizeu_lbl (LMInt 32)
+      ptr_var = LMLocalVar ptr_lbl (LMPointer (LMInt 8))
+      res_var = LMLocalVar res_lbl (LMPointer tp)
+      arrlen_var = LMLocalVar arrlen_lbl (LMPointer idx_tp)
+  return (res_var,[Store len_var arrlen_var 
+                  ,Assignment arrlen_var (GetElemPtr True res_var [ LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                  , LMLitVar (LMIntLit 0 (LMInt 32))])
+                  ,Assignment res_var (Cast LM_Bitcast ptr_var (LMPointer tp))
+                  ,Assignment ptr_var (Malloc (LMInt 8) sizeu_var)
+                  ,Assignment sizeu_var (Cast LM_Ptrtoint size_var (LMInt 32))
+                  ,Assignment size_var (GetElemPtr False (LMLitVar $ LMNullLit (LMPointer tp)) [ LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                                               , LMLitVar (LMIntLit 1 (LMInt 32))
+                                                                                               , len_var
+                                                                                               ])
+                  ])
 
 typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
 typeCheck expr Nothing act = return ()

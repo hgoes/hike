@@ -167,7 +167,7 @@ data LlvmExpression
       * tp:     LlvmType to reserve room for
       * amount: The nr of tp's which must be allocated
   -}
-  | Malloc LlvmType Int
+  | Malloc LlvmType LlvmVar
 
   {- |
     Load the value at location ptr
