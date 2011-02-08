@@ -352,6 +352,7 @@ data CompileExprResult
      = ResultCalc [LlvmStatement] LlvmVar RType
      | ResultMethod [LlvmStatement] LlvmVar LlvmVar RType [RType]
      | ResultClass Integer
+     | ResultBuiltIn ConstantIdentifier
      deriving Show
 
 compileExpression :: p -> Expression p -> Maybe RType -> Compiler CompileExprResult p
@@ -366,30 +367,32 @@ compileExpression _ (ExprInt n) tp
       TypeFloat -> return $ LMFloatLit (fromIntegral n) ttp
       _ -> throwError [TypeMismatch (ExprInt n) TypeInt rtp]
     return $ ResultCalc [] (LMLitVar lit) rtp
-compileExpression pos e@(ExprId name) etp = do
-  (ref,_) <- stackLookupM (Just pos) name
-  case ref of
-    Variable tp Nothing -> throwError [UninitializedVariable pos name]
-    Variable tp (Just cont) -> do
-      typeCheck e etp tp
-      return $ ResultCalc [] cont tp
-    Function rtype args -> do
-      let ConstId _ (rname:_) = name
-      decl <- genFuncDecl (BS.pack rname) rtype args
-      return $ ResultCalc [] (LMGlobalVar (BS.pack rname) (LMFunction decl) Internal Nothing Nothing True) (TypeFunction rtype args)
-    Class i -> return $ ResultClass i
-    ClassMember this tp idx -> do
-      typeCheck e etp tp
-      tmp <- newLabel
-      tmptp <- toLLVMType tp
-      rlbl <- newLabel
-      let tmpvar = LMLocalVar tmp (LMPointer tmptp)
-          rvar = LMLocalVar rlbl tmptp
-      return $ ResultCalc [Assignment rvar (Load tmpvar)
-                          ,Assignment tmpvar
-                           (GetElemPtr True this [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
-                          ] rvar tp
-    _ -> throwError [NotImplemented $ "Expression result "++show ref]
+compileExpression pos e@(ExprId name) etp
+  | Map.member name builtIns = return $ ResultBuiltIn name
+  | otherwise = do
+    (ref,_) <- stackLookupM (Just pos) name
+    case ref of
+      Variable tp Nothing -> throwError [UninitializedVariable pos name]
+      Variable tp (Just cont) -> do
+        typeCheck e etp tp
+        return $ ResultCalc [] cont tp
+      Function rtype args -> do
+        let ConstId _ (rname:_) = name
+        decl <- genFuncDecl (BS.pack rname) rtype args
+        return $ ResultCalc [] (LMGlobalVar (BS.pack rname) (LMFunction decl) Internal Nothing Nothing True) (TypeFunction rtype args)
+      Class i -> return $ ResultClass i
+      ClassMember this tp idx -> do
+        typeCheck e etp tp
+        tmp <- newLabel
+        tmptp <- toLLVMType tp
+        rlbl <- newLabel
+        let tmpvar = LMLocalVar tmp (LMPointer tmptp)
+            rvar = LMLocalVar rlbl tmptp
+        return $ ResultCalc [Assignment rvar (Load tmpvar)
+                            ,Assignment tmpvar
+                             (GetElemPtr True this [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                            ] rvar tp
+      _ -> throwError [NotImplemented $ "Expression result "++show ref]
 compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
   (rextra,rres,tpr) <- compileExpression' "binary expressions" rexpr (Just tpl)
@@ -440,6 +443,10 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
         resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
         return $ ResultCalc ([Assignment resvar (Call StdCall fvar (this:[ v | (_,v,_) <- rargs ]) [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
       | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
+    ResultBuiltIn b -> do
+      rargs <- mapM (\arg -> compileExpression' "builtin argument" arg Nothing) args
+      (var,stmts,rtp) <- (builtIns!b) [ (var,tp) | (stmt,var,tp) <- rargs ]
+      return $ ResultCalc (stmts++concat [ stmt | (stmt,_,_) <- rargs ]) var rtp
 compileExpression pos e@(ExprAccess expr name) etp = do
   (extra,rvar,tp) <- compileExpression' "accessor" expr Nothing
   case tp of
@@ -691,3 +698,22 @@ newPhiVars vars = do
                   lbl <- newLabel
                   return (var,lbl)) (Set.toAscList vars)
   return $ Map.fromAscList res
+
+type BuiltIn p = [(LlvmVar,RType)] -> Compiler (LlvmVar,[LlvmStatement],RType) p
+
+builtIns :: Map ConstantIdentifier (BuiltIn p)
+builtIns = Map.fromList [(ConstId False ["sizeof"],sizeOf)]
+
+sizeOf :: BuiltIn p
+sizeOf [(arg,tp)] = case tp of
+  TypeArray el_tp -> do
+    rel_tp <- toLLVMType el_tp
+    res_lbl <- newLabel
+    tmp_lbl <- newLabel
+    let res_var = LMLocalVar res_lbl (LMInt 32)
+        tmp_var = LMLocalVar tmp_lbl (LMPointer $ LMInt 32)
+    return (res_var,[Assignment res_var (Load tmp_var)
+                    ,Assignment tmp_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                             , LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                             ])
+                    ],TypeInt)
