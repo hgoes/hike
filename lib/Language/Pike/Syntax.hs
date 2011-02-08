@@ -17,6 +17,7 @@ data DefinitionBody p
     | FunctionDef String Type [(String,Type)] [Pos Statement p]
     | ClassDef String [(String,Type)] [Definition p]
     | VariableDef Type [String]
+    | Inherit ConstantIdentifier
     deriving Show
 
 data Modifier

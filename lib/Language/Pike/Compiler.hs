@@ -647,7 +647,7 @@ stackPushClass :: Integer -> Compiler () p
 stackPushClass cid = do
   classmap <- ask
   let entr = classmap!cid
-  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid (Re.classVariables entr) (Re.classMethods entr) (Re.classInners entr) st)
+  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid (Re.classVariables entr) (Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st)
 
 stackAlloc :: String -> RType -> Compiler () p
 stackAlloc name tp = modify $ \(n,st) -> (n,stackAllocVar name tp st)

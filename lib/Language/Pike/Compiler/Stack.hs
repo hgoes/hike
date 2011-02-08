@@ -2,6 +2,7 @@ module Language.Pike.Compiler.Stack where
 
 import Language.Pike.Syntax
 import Data.Map as Map
+import Data.Set as Set
 import Data.List (find)
 
 data StackReference ref = Variable RType (Maybe ref)
@@ -18,12 +19,13 @@ data Stack ref = GlobalContext
                  , globalClasses   :: Map String Integer
                  }
                | ClassContext
-                 { className    :: String
-                 , classId      :: Integer
-                 , classMembers :: [(String,RType)]
-                 , classMethods :: Map String (RType,[RType])
-                 , classClasses :: Map String Integer
-                 , classUpper   :: Stack ref
+                 { className     :: String
+                 , classId       :: Integer
+                 , classMembers  :: [(String,RType)]
+                 , classMethods  :: Map String (RType,[RType])
+                 , classClasses  :: Map String Integer
+                 , classInherits :: Set Integer
+                 , classUpper    :: Stack ref
                  }
                | LocalContext
                  { localUp   :: Stack ref

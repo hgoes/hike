@@ -41,6 +41,7 @@ data Keyword = KeyArray
              | KeyFor
              | KeyIf
              | KeyImport
+             | KeyInherit
              | KeyInt
              | KeyLambda
              | KeyPublic

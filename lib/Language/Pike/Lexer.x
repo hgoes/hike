@@ -19,6 +19,7 @@ tokens :-
   for                     { key KeyFor }
   if                      { key KeyIf }
   import                  { key KeyImport }
+  inherit                 { key KeyInherit }
   int                     { key KeyInt }
   lambda                  { key KeyLambda }
   public                  { key KeyPublic }
