@@ -547,6 +547,24 @@ compileAssign pos (ExprAccess expr name) = do
           return (Right (tmpvar,[Assignment tmpvar
                                  (GetElemPtr True cvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
                                 ]++stmts),ntp)
+compileAssign pos (ExprIndex expr idx) = do
+  (res,rtp) <- compileAssign (position expr) (posObj expr)
+  (cvar,stmts) <- case res of
+    Left (name,var) -> case var of
+      Just rvar -> return (rvar,[])
+      Nothing -> throwError [UninitializedVariable pos (ConstId False [name])]
+    Right r -> return r
+  (idxstmts,idxvar,_) <- compileExpression' "index" idx (Just TypeInt)
+  case rtp of
+    TypeArray eltp -> do
+      tmp_lbl <- newLabel
+      tmp_tp <- toLLVMType eltp
+      let tmp_var = LMLocalVar tmp_lbl (LMPointer tmp_tp)
+      return (Right (tmp_var,[Assignment tmp_var
+                              (GetElemPtr False cvar [ LMLitVar (LMIntLit 0 (LMInt 32))
+                                                     , LMLitVar (LMIntLit 1 (LMInt 32))
+                                                     , idxvar ])
+                             ]++stmts++idxstmts),eltp)
 
 sizedArrayMalloc :: LlvmType -> LlvmType -> LlvmVar -> Compiler (LlvmVar,[LlvmStatement]) p
 sizedArrayMalloc idx_tp el_tp len_var = do
