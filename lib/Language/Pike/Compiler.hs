@@ -464,6 +464,43 @@ compileExpression pos e@(ExprAccess expr name) etp = do
                                ,Assignment tmpvar
                                 (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
                                ]++extra) resvar rtp
+compileExpression pos e@(ExprArray elems) etp = do
+  let el_tp = case etp of
+        Nothing -> Nothing
+        Just tp -> case tp of
+          TypeArray eel_tp -> Just $ Just eel_tp
+          _ -> Just Nothing
+  res1 <- case elems of
+    [] -> return Nothing
+    el:_ -> fmap Just $ compileExpression' "array element" el (case el_tp of
+                                                                 Nothing -> Nothing
+                                                                 Just Nothing -> Nothing
+                                                                 Just tp -> tp)
+  res1_tp <- case res1 of
+    Nothing -> return Nothing
+    Just (_,_,tp) -> return $ Just tp
+  rel_tp <- case el_tp of
+    Nothing -> case res1_tp of
+      Nothing -> return TypeVoid
+      Just tp -> return tp
+    Just Nothing -> case res1_tp of
+      Just tp -> throwError [TypeMismatch e (TypeArray tp) (let Just etp' = etp in etp')]
+      Nothing -> throwError [TypeMismatch e (TypeArray TypeVoid) (let Just etp' = etp in etp')]
+    Just (Just tp) -> return tp
+  res_lbl <- newLabel
+  res_tp <- toLLVMType rel_tp
+  let rvar = LMLocalVar res_lbl (LMPointer res_tp)
+  args <- mapM (\(el,i) -> do
+                  (stmts,resvar,_) <- compileExpression' "array element" el (Just rel_tp)
+                  tmp_lbl <- newLabel
+                  let tmp_var = LMLocalVar tmp_lbl (LMPointer res_tp)
+                  return $ [Store resvar tmp_var
+                           ,Assignment tmp_var (GetElemPtr True rvar [LMLitVar (LMIntLit i (LMInt 32))])
+                           ]++stmts
+              ) (zip elems [0..])
+  return $ ResultCalc ((concat args) ++ [Assignment rvar (Malloc res_tp (length elems))]) rvar (TypeArray rel_tp)
+  
+  
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
 
@@ -474,6 +511,7 @@ compileAssign pos (ExprId cid) = do
     Variable tp var -> do
       let ConstId _ (name:_) = cid
       return (Left (name,var),tp)
+    _ -> throwError [NotImplemented $ "Assigning to "++show ref]
 compileAssign pos (ExprAccess expr name) = do
   (res,rtp) <- compileAssign (position expr) (posObj expr)
   (cvar,stmts) <- case res of
