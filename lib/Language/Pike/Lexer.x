@@ -49,6 +49,8 @@ tokens :-
   \" (. # \")* \"         { \p s l -> ConstString $ read (LBS.unpack $ LBS.take (fromIntegral l) s) }
   "+"                     { op OpPlus }
   "-"                     { op OpMinus }
+  "//" (. # \n)*          ;
+  "/*" (([\x00-\xff] # \/) | "/" (. # \*))* "*/" ; 
 {
 
 data LexerPos = LexerPos !Int !Int deriving Show
