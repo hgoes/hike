@@ -142,6 +142,8 @@ toLLVMType tp = do
 toLLVMType' :: ClassMap -> RType -> LlvmType
 toLLVMType' _ TypeInt = LMInt 32
 toLLVMType' _ TypeBool = LMInt 1
+toLLVMType' cls (TypeArray el) = let eltp = toLLVMType' cls el
+                                 in LMPointer $ LMStruct [LMInt 32,LMArray 0 eltp]
 toLLVMType' cls (TypeId n) = LMPointer $ LMAlias $ BS.pack $ Re.className $ cls!n
 
 translateType :: Type -> Compiler RType p
