@@ -25,6 +25,8 @@ instance Show Token where
     show (Bracket Square True) = "']'"
     show (Bracket Curly False) = "'{'"
     show (Bracket Curly True) = "'}'"
+    show (Bracket ArrayDelim False) = "'({'"
+    show (Bracket ArrayDelim True) = "'})'"
     show (ConstString str) = "string "++show str
     show (ConstInt i) = "integer "++show i
     show (Op x) = "operator "++show x
@@ -52,6 +54,7 @@ data BracketType
     = Parenthesis
     | Square
     | Curly
+    | ArrayDelim
     deriving Show
 
 data Operator = OpAssign

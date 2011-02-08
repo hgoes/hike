@@ -38,6 +38,8 @@ import Control.Monad.Error
   ":"                        { Colon }
   ";"                        { Semicolon }
   ","                        { Comma }
+  "({"                       { Bracket ArrayDelim False }
+  "})"                       { Bracket ArrayDelim True }
   "("                        { Bracket Parenthesis False }
   ")"                        { Bracket Parenthesis True }
   "{"                        { Bracket Curly False }
@@ -151,6 +153,7 @@ ExpressionSimple : ConstantIdentifier                    {% positional $ ExprId 
                  | ExpressionSimple "->" identifier      {% positional $ ExprAccess $1 $3 }
                  | ExpressionSimple "[" Expression "]"   {% positional $ ExprIndex $1 $3 }
                  | "lambda" "(" Arguments ")" Statement  {% positional $ ExprLambda $3 $5 }
+                 | "({" ExprList "})"                    {% positional $ ExprArray $2 }
 
 LValue : ExpressionSimple { $1 }
 --LValue : ConstantIdentifier     { LVId $1 }

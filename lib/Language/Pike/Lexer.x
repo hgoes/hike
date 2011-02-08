@@ -30,6 +30,8 @@ tokens :-
   ";"                     { \p l -> const Semicolon }
   "."                     { \p l -> const Dot }
   ","                     { \p l -> const Comma }
+  "({"                    { \p l -> const (Bracket ArrayDelim False) }
+  "})"                    { \p l -> const (Bracket ArrayDelim True) }
   "("                     { \p l -> const (Bracket Parenthesis False) }
   ")"                     { \p l -> const (Bracket Parenthesis True) }
   "["                     { \p l -> const (Bracket Square False) }
