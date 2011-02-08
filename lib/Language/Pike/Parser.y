@@ -107,6 +107,9 @@ Block : "{" Statements "}" { $2 }
 Statements : Statement Statements { $1:$2 }
            |                      { [] }
 
+StatementOpt : Statement { Just $1 }
+             |           { Nothing }
+
 Statement : Statement1 { $1 }
           | Statement2 { $1 }
           | error      {%^ expected "statement" }
@@ -128,8 +131,12 @@ Statement1NP : "{" Statements "}"                                               
              | "return" ExpressionE ";"                                              { StmtReturn (Just $2) }
              | "return" ";"                                                          { StmtReturn Nothing }
              | "while" "(" Expression ")" Block                                      { StmtWhile $3 $5 }
-             | "for" "(" ExpressionOpt ";" ExpressionOpt ";" ExpressionOpt ")" Block { StmtFor $3 $5 $7 $9 }
+             | "for" "(" ExprOrDecl ";" ExpressionOpt ";" ExpressionOpt ")" Block    { StmtFor $3 $5 $7 $9 }
              | "break" ";"                                                           { StmtBreak }
+
+ExprOrDecl : Expression                       { Just $ Left $1 }
+           | Type identifier "=" ExpressionE  { Just $ Right ($1,$2,$4) }
+           |                                  { Nothing }
 
 ExpressionE : Expression { $1 }
             | error      {%^ expected "expression" }

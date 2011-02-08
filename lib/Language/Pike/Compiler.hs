@@ -227,6 +227,18 @@ compileStatement _ st@(StmtReturn expr) cur = do
       (extra,res,_) <- compileExpression' "return value" rexpr (Just rtp)
       appendStatements ([Return (Just res)]++extra) cur
 compileStatement _ (StmtWhile cond body) cur = compileWhile cond body cur
+compileStatement pos (StmtFor init cond it body) cur = do
+  let init' = case init of
+        Nothing -> []
+        Just (Left expr) -> [Pos (StmtExpr expr) pos]
+        Just (Right (tp,name,expr)) -> [Pos (StmtDecl name tp (Just expr)) pos]
+      cond' = case cond of
+        Nothing -> Pos (ExprInt 1) pos
+        Just expr -> expr
+      it' = case it of
+        Nothing -> []
+        Just stmt -> [Pos (StmtExpr stmt) pos]
+  compileStatement pos (StmtBlock (init'++[Pos (StmtWhile cond' (body++it')) pos])) cur
 compileStatement _ (StmtExpr expr) cur = do
   (stmts,var,_) <- compileExpression' "statement expression" expr Nothing
   appendStatements stmts cur
@@ -674,7 +686,8 @@ writes xs = writes' xs Set.empty
     writes'' (StmtReturn (Just expr)) s = writes''' (posObj expr) s
     writes'' (StmtFor init cond it body) s = let s1 = case init of
                                                    Nothing -> s
-                                                   Just (Pos r1 _) -> writes''' r1 s
+                                                   Just (Left (Pos r1 _)) -> writes''' r1 s
+                                                   Just (Right (_,_,Pos r1 _)) ->  writes''' r1 s
                                                  s2 = case cond of
                                                    Nothing -> s1
                                                    Just (Pos r2 _) -> writes''' r2 s1

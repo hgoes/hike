@@ -58,7 +58,10 @@ data Statement p
     | StmtIf (Pos Expression p) (Pos Statement p) (Maybe (Pos Statement p))
     | StmtReturn (Maybe (Pos Expression p))
     | StmtWhile (Pos Expression p) [Pos Statement p]
-    | StmtFor (Maybe (Pos Expression p)) (Maybe (Pos Expression p)) (Maybe (Pos Expression p)) [Pos Statement p]
+    | StmtFor
+      (Maybe (Either (Pos Expression p) (Type,String,Pos Expression p)))
+      (Maybe (Pos Expression p))
+      (Maybe (Pos Expression p)) [Pos Statement p]
     | StmtBreak
     deriving Show
 
