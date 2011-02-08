@@ -499,8 +499,20 @@ compileExpression pos e@(ExprArray elems) etp = do
                            ]++stmts
               ) (zip elems [0..])
   return $ ResultCalc ((concat args) ++ [Assignment rvar (Malloc res_tp (length elems))]) rvar (TypeArray rel_tp)
-  
-  
+compileExpression pos e@(ExprIndex expr idx) etp = do  
+  (stmts_expr,resvar_expr,tp_expr) <- compileExpression' "indexed expression" expr Nothing
+  (stmts_idx,resvar_idx,_) <- compileExpression' "index expression" idx (Just TypeInt)
+  case tp_expr of
+    TypeArray rtp -> do
+      typeCheck e etp rtp
+      tmp_lbl <- newLabel
+      res_lbl <- newLabel
+      rtp_llvm <- toLLVMType rtp
+      let tmp_var = LMLocalVar tmp_lbl (LMPointer rtp_llvm)
+          res_var = LMLocalVar res_lbl rtp_llvm
+      return $ ResultCalc ([Assignment res_var (Load tmp_var)
+                           ,Assignment tmp_var (GetElemPtr False resvar_expr [resvar_idx])
+                           ]++stmts_idx++stmts_expr) res_var rtp
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
 
