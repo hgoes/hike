@@ -72,6 +72,7 @@ data Expression p
     | ExprAccess (Pos Expression p) String
     | ExprIndex (Pos Expression p) (Pos Expression p)
     | ExprLambda [(String,Type)] (Pos Statement p)
+    | ExprArray [Pos Expression p]
     deriving Show
 
 data LValue
