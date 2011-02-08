@@ -142,6 +142,7 @@ toLLVMType tp = do
 toLLVMType' :: ClassMap -> RType -> LlvmType
 toLLVMType' _ TypeInt = LMInt 32
 toLLVMType' _ TypeBool = LMInt 1
+toLLVMType' _ TypeVoid = LMVoid
 toLLVMType' cls (TypeArray el) = let eltp = toLLVMType' cls el
                                  in LMPointer $ LMStruct [LMInt 32,LMArray 0 eltp]
 toLLVMType' cls (TypeId n) = LMPointer $ LMAlias $ BS.pack $ Re.className $ cls!n
@@ -436,10 +437,16 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
     ResultCalc eStmts eVar ftp -> case ftp of
       TypeFunction rtp argtp
           | (length argtp) == (length args) -> do
+            typeCheck e etp rtp
             rargs <- zipWithM (\arg tp -> compileExpression' "function argument" arg (Just tp)) args argtp
-            res <- newLabel
-            resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
-            return $ ResultCalc ([Assignment resvar (Call StdCall eVar [ v | (_,v,_) <- rargs ] [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
+            let call = Call StdCall eVar [ v | (_,v,_) <- rargs ] []
+                rest = (concat [stmts | (stmts,_,_) <- rargs])++eStmts
+            case rtp of
+              TypeVoid -> return $ ResultCalc ([Expr call]++rest) (LMLitVar (LMUndefLit LMVoid)) rtp
+              _ -> do
+                res <- newLabel
+                resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
+                return $ ResultCalc ([Assignment resvar call]++rest) resvar rtp
           | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
       _ -> throwError [NotAFunction e ftp]
     ResultClass n -> do
@@ -452,10 +459,16 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))] resvar (TypeId n)
     ResultMethod eStmts fvar this rtp argtp
       | (length argtp) == (length args) -> do
+        typeCheck e etp rtp
         rargs <- zipWithM (\arg tp -> compileExpression' "method argument" arg (Just tp)) args argtp
-        res <- newLabel
-        resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
-        return $ ResultCalc ([Assignment resvar (Call StdCall fvar (this:[ v | (_,v,_) <- rargs ]) [])]++(concat [stmts | (stmts,_,_) <- rargs])++eStmts) resvar rtp
+        let call = Call StdCall fvar (this:[ v | (_,v,_) <- rargs ]) []
+            rest = (concat [stmts | (stmts,_,_) <- rargs])++eStmts
+        case rtp of
+          TypeVoid -> return $ ResultCalc ([Expr call]++rest) (LMLitVar (LMUndefLit LMVoid)) rtp
+          _ -> do
+            res <- newLabel
+            resvar <- toLLVMType rtp >>= return.(LMLocalVar res)
+            return $ ResultCalc ([Assignment resvar call]++rest) resvar rtp
       | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
     ResultBuiltIn b -> do
       rargs <- mapM (\arg -> compileExpression' "builtin argument" arg Nothing) args
@@ -547,6 +560,15 @@ compileAssign pos (ExprId cid) = do
     Variable tp var -> do
       let ConstId _ (name:_) = cid
       return (Left (name,var),tp)
+    ClassMember var tp idx -> do
+      tmp_lbl <- newLabel
+      res_lbl <- newLabel
+      rtp <- toLLVMType tp
+      let tmp_var = LMLocalVar tmp_lbl (LMPointer rtp)
+      return (Right (tmp_var,[Assignment tmp_var (GetElemPtr True var [LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                      ,LMLitVar (LMIntLit idx (LMInt 32))
+                                                                      ])
+                             ]),tp)
     _ -> throwError [NotImplemented $ "Assigning to "++show ref]
 compileAssign pos (ExprAccess expr name) = do
   (res,rtp) <- compileAssign (position expr) (posObj expr)
