@@ -94,7 +94,14 @@ compileFunction name ret args block = do
 compileBody :: [Pos Statement p] -> RType -> Compiler [LlvmBlock] p
 compileBody stmts rtp = do
   blks <- compileStatements stmts []
-  return $ readyBlocks blks
+  nblks <- if lastBlockTerminated blks
+          then return blks
+          else (case rtp of
+                   TypeVoid -> appendStatements [Return Nothing] blks
+                   _ -> do
+                     var <- mbDefault rtp Nothing
+                     appendStatements [Return $ Just var] blks)
+  return $ readyBlocks nblks
 
 readyBlocks :: [LlvmBlock] -> [LlvmBlock]
 readyBlocks = reverse.fmap (\blk -> blk { blockStmts = case blockStmts blk of
