@@ -126,13 +126,15 @@ genFuncDecl name ret_tp args = do
 mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
 mapMaybeM f xs = mapM f xs >>= return.catMaybes
 
+generateStruct :: ClassMap -> ClassMapEntry -> [LlvmType]
+generateStruct cm entr = let cur = fmap (\(_,tp) -> toLLVMType' cm tp) (classVariables entr) 
+                             inh = concat $ fmap (\i -> generateStruct cm (cm!i)) (Set.toList $ Re.classInherits entr)
+                         in cur++inh
+
 generateAliases :: Compiler [LlvmAlias] p
 generateAliases = do
   mp <- ask
-  mapM (\cls -> do
-           struct <- mapM (\(_,tp) -> toLLVMType tp) (classVariables cls)
-           return (BS.pack $ Re.className cls,LMStruct struct)
-       ) (Map.elems mp)
+  return $ fmap (\cls -> (BS.pack $ Re.className cls,LMStruct $ (LMInt 32):(generateStruct mp cls))) (Map.elems mp)
 
 stackLookupM :: Maybe p -> ConstantIdentifier -> Compiler (StackReference LlvmVar,Integer) p
 stackLookupM pos i = do
