@@ -197,6 +197,15 @@ returnType (LocalContext { localUp = up
   MethodContext { methodReturnType = rtp } -> Just rtp
   _ -> returnType up
 
+thisPointer :: Stack r -> Maybe r
+thisPointer (GlobalContext {}) = Nothing
+thisPointer (ClassContext { classUpper = up }) = thisPointer up
+thisPointer (LocalContext { localUp = up
+                          , localType = tp
+                          }) = case tp of
+  MethodContext { methodThis = this } -> Just this
+  _ -> thisPointer up
+
 breakLabel :: Stack r -> Maybe Integer
 breakLabel (GlobalContext {}) = Nothing
 breakLabel (ClassContext { classUpper = up }) = breakLabel up

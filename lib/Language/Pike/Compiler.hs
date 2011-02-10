@@ -361,6 +361,13 @@ breakLabelM pos = do
     Nothing -> throwError [NothingToBreakTo pos]
     Just brk -> return brk
 
+thisPointerM :: Compiler LlvmVar p
+thisPointerM = do
+  (_,st) <- get
+  case thisPointer st of
+    Nothing -> error "Internal error: this pointer couldn't be resolved"
+    Just this -> return this
+
 compileExpression' :: String -> Pos Expression p -> Maybe RType -> Compiler ([LlvmStatement],LlvmVar,RType) p
 compileExpression' reason (Pos expr pos) rt = do
   res <- compileExpression pos expr rt
@@ -414,6 +421,15 @@ compileExpression pos e@(ExprId name) etp
                             ,Assignment tmpvar
                              (GetElemPtr True this [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
                             ] rvar tp
+      ClassMethod cls rtype argtps -> do
+        this <- thisPointerM
+        cm <- ask
+        let ConstId _ (rname:_) = name
+            entr = cm!cls
+            fname = (BS.pack $ (Re.className entr) ++ "__" ++ rname)
+        decl <- genFuncDecl fname rtype ((TypeId cls):argtps)
+        return $ ResultMethod [] (LMGlobalVar fname (LMFunction decl) Internal Nothing Nothing False) this rtype argtps
+        
       _ -> throwError [NotImplemented $ "Expression result "++show ref]
 compileExpression _ e@(ExprBin op lexpr rexpr) etp = do
   (lextra,lres,tpl) <- compileExpression' "binary expressions" lexpr Nothing
