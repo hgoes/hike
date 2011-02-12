@@ -129,7 +129,7 @@ mapMaybeM f xs = mapM f xs >>= return.catMaybes
 generateStruct :: ClassMap -> ClassMapEntry -> [LlvmType]
 generateStruct cm entr = let cur = fmap (\(_,tp) -> toLLVMType' cm tp) (classVariables entr) 
                              inh = concat $ fmap (\i -> generateStruct cm (cm!i)) (Set.toList $ Re.classInherits entr)
-                         in cur++inh
+                         in inh++cur
 
 generateAliases :: Compiler [LlvmAlias] p
 generateAliases = do
@@ -421,7 +421,7 @@ compileExpression pos e@(ExprId name) etp
             rvar = LMLocalVar rlbl tmptp
         return $ ResultCalc [Assignment rvar (Load tmpvar)
                             ,Assignment tmpvar
-                             (GetElemPtr True this [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                             (GetElemPtr True this [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx+1]])
                             ] rvar tp
       ClassMethod cls rtype argtps -> do
         this <- thisPointerM
@@ -521,7 +521,7 @@ compileExpression pos e@(ExprAccess expr name) etp = do
               resvar = LMLocalVar rlbl tmptp
           return $ ResultCalc ([Assignment resvar (Load tmpvar)
                                ,Assignment tmpvar
-                                (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                                (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx+1]])
                                ]++extra) resvar rtp
 compileExpression pos e@(ExprArray elems) etp = do
   let el_tp = case etp of
@@ -591,7 +591,7 @@ compileAssign pos (ExprId cid) = do
       rtp <- toLLVMType tp
       let tmp_var = LMLocalVar tmp_lbl (LMPointer rtp)
       return (Right (tmp_var,[Assignment tmp_var (GetElemPtr True var [LMLitVar (LMIntLit 0 (LMInt 32))
-                                                                      ,LMLitVar (LMIntLit idx (LMInt 32))
+                                                                      ,LMLitVar (LMIntLit (idx+1) (LMInt 32))
                                                                       ])
                              ]),tp)
     _ -> throwError [NotImplemented $ "Assigning to "++show ref]
@@ -613,7 +613,7 @@ compileAssign pos (ExprAccess expr name) = do
           tmptp <- toLLVMType ntp
           let tmpvar = LMLocalVar tmp (LMPointer tmptp)
           return (Right (tmpvar,[Assignment tmpvar
-                                 (GetElemPtr True cvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx]])
+                                 (GetElemPtr True cvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx+1]])
                                 ]++stmts),ntp)
 compileAssign pos (ExprIndex expr idx) = do
   (res,rtp) <- compileAssign (position expr) (posObj expr)
