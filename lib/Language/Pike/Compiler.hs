@@ -480,8 +480,14 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       let entr = classmap!n
           int_name = BS.pack $ Re.className entr
       lbl <- newLabel
+      lbl_tmp <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
-      return $ ResultCalc [Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))] resvar (TypeId n)
+          tmpvar = LMLocalVar lbl_tmp (LMPointer (LMInt 32))
+      return $ ResultCalc [Store (LMLitVar (LMIntLit n (LMInt 32))) tmpvar
+                          ,Assignment tmpvar (GetElemPtr True resvar [ LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                     , LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                     ])
+                          ,Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))] resvar (TypeId n)
     ResultMethod eStmts fvar this rtp argtp
       | (length argtp) == (length args) -> do
         typeCheck e etp rtp
