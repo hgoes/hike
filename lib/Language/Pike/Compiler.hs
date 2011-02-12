@@ -475,6 +475,7 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
           | otherwise -> throwError [WrongNumberOfArguments e (length  args) (length argtp)]
       _ -> throwError [NotAFunction e ftp]
     ResultClass n -> do
+      typeCheck e etp (TypeId n)
       classmap <- ask
       --let (name,int_name,funcs) = classmap!n
       let entr = classmap!n
@@ -667,11 +668,24 @@ sizedArrayMalloc idx_tp el_tp len_var = do
                                                                                                ])
                   ])
 
+checkSubtyping :: Integer -> Integer -> Compiler Bool p
+checkSubtyping par ch
+  | par == ch  = return True
+  | otherwise = do
+    cm <- ask
+    let entr = cm!ch
+    res <- mapM (\i -> checkSubtyping par i) (Set.toList $ Re.classInherits entr)
+    return $ or res
+
 typeCheck :: Expression p -> Maybe RType -> RType -> Compiler () p
 typeCheck expr Nothing act = return ()
 typeCheck expr (Just req@(TypeFunction TypeVoid args)) act@(TypeFunction _ eargs)
   | args == eargs = return ()
   | otherwise    = throwError [TypeMismatch expr act req]
+typeCheck expr (Just (TypeId c1)) (TypeId c2) = do
+  res <- checkSubtyping c1 c2
+  if res then return () else throwError [TypeMismatch expr (TypeId c1) (TypeId c2)]
+  
 typeCheck expr (Just req) act
   | req == act = return ()
   | otherwise = throwError [TypeMismatch expr act req]
