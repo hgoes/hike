@@ -503,16 +503,12 @@ compileExpression pos e@(ExprAccess expr name) etp = do
   (extra,rvar,tp) <- compileExpression' "accessor" expr Nothing
   case tp of
     TypeId cid -> do
-      classmap <- ask
-      let entr = classmap!cid
-      case lookupWithIndex name (classVariables entr) of
-        Nothing -> case Map.lookup name (Re.classMethods entr) of
-          Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
-          Just (rtp,args) -> do
-            let fname = (BS.pack $ (Re.className entr) ++ "__" ++ name)
-            decl <- genFuncDecl fname rtp (tp:args)
-            return $ ResultMethod extra (LMGlobalVar fname (LMFunction decl) Internal Nothing Nothing False) rvar rtp args
-        Just (rtp,idx) -> do
+      cm <- ask
+      let entr = cm!cid
+      res <- lookupMember cid name
+      case res of
+        Left _ -> throwError [NoSuchMember pos (Re.className entr) name]
+        Right (Left (rtp,idx)) -> do
           typeCheck e etp rtp
           tmp <- newLabel
           tmptp <- toLLVMType rtp
@@ -523,6 +519,10 @@ compileExpression pos e@(ExprAccess expr name) etp = do
                                ,Assignment tmpvar
                                 (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx+1]])
                                ]++extra) resvar rtp
+        Right (Right (rtp,args)) -> do
+          let fname = (BS.pack $ (Re.className entr) ++ "__" ++ name)
+          decl <- genFuncDecl fname rtp (tp:args)
+          return $ ResultMethod extra (LMGlobalVar fname (LMFunction decl) Internal Nothing Nothing False) rvar rtp args
 compileExpression pos e@(ExprArray elems) etp = do
   let el_tp = case etp of
         Nothing -> Nothing
@@ -606,9 +606,11 @@ compileAssign pos (ExprAccess expr name) = do
     TypeId cid -> do
       classmap <- ask
       let entr = classmap!cid
-      case lookupWithIndex name (classVariables entr) of
-        Nothing -> throwError [NoSuchMember pos (Re.className entr) name]
-        Just (ntp,idx) -> do
+      res <- lookupMember cid name
+      case res of
+        Left _ -> throwError [NoSuchMember pos (Re.className entr) name]
+        Right (Right _) -> throwError [NoSuchMember pos (Re.className entr) name]
+        Right (Left (ntp,idx)) -> do
           tmp <- newLabel
           tmptp <- toLLVMType ntp
           let tmpvar = LMLocalVar tmp (LMPointer tmptp)
@@ -694,7 +696,14 @@ stackPushClass :: Integer -> Compiler () p
 stackPushClass cid = do
   classmap <- ask
   let entr = classmap!cid
-  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid (Re.classVariables entr) (Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st)
+  memb <- getInheritedMembers entr
+  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid memb (Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st)
+
+getInheritedMembers :: ClassMapEntry -> Compiler [(String,RType)] p
+getInheritedMembers entr = do
+  cm <- ask
+  inh <- mapM (\i -> getInheritedMembers (cm!i)) (Set.toList $ Re.classInherits entr)
+  return $ concat inh ++ (Re.classVariables entr)
 
 stackAlloc :: String -> RType -> Compiler () p
 stackAlloc name tp = modify $ \(n,st) -> (n,stackAllocVar name tp st)
@@ -779,3 +788,32 @@ sizeOf [(arg,tp)] = case tp of
                                                              , LMLitVar $ LMIntLit 0 (LMInt 32)
                                                              ])
                     ],TypeInt)
+
+type RecLookupResult = Either Integer (Either (RType,Integer) (RType,[RType]))
+
+lookupMember' :: [Integer] -> String -> Compiler RecLookupResult p
+lookupMember' [] _ = return $ Left 0
+lookupMember' (x:xs) name = do
+  res <- lookupMember x name
+  case res of
+    Right rr -> return $ Right rr
+    Left off -> do
+      nres <- lookupMember' xs name
+      case nres of
+        Left noff -> return $ Left $ off+noff
+        Right rr -> case rr of
+          Left (tp,noff) -> return $ Right $ Left (tp,off+noff)
+          Right rrr -> return $ Right $ Right rrr
+
+lookupMember :: Integer -> String -> Compiler RecLookupResult p
+lookupMember cid name = do
+  cm <- ask
+  let entr = cm!cid
+  inh <- lookupMember' (Set.toList $ Re.classInherits entr) name
+  case inh of
+    Right res -> return $ Right res
+    Left off -> case lookupWithIndex name (classVariables entr) of
+      Just (rtp,idx) -> return $ Right $ Left (rtp,idx+off)
+      Nothing -> case Map.lookup name (Re.classMethods entr) of
+        Nothing -> return $ Left $ fromIntegral $ length (classVariables entr)
+        Just res -> return $ Right $ Right res
