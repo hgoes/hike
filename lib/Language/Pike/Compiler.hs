@@ -160,7 +160,7 @@ generateVTables = do
                statics = fmap fst elems
                tps = fmap snd elems
                alias_name = BS.pack $ "VTable__"++Re.className cls
-           return ((LMGlobalVar (BS.pack $ "vtable__"++Re.className cls) (LMAlias alias_name) Internal Nothing Nothing True,Just $ LMStaticStruc statics (LMStruct tps)),
+           return ((LMGlobalVar (BS.pack $ "vtable__"++Re.className cls) (LMAlias alias_name) Internal Nothing Nothing True,Just $ LMStaticStruc statics (LMAlias alias_name)),
                    (alias_name,LMStruct tps)
                   )
        ) (Map.toList mp)
