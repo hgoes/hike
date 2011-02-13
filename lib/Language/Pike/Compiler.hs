@@ -571,8 +571,8 @@ compileExpression pos e@(ExprAccess expr name) etp = do
                                ,Assignment tmpvar
                                 (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx+1]])
                                ]++extra) resvar rtp
-        Right (Right (rtp,args,idx)) -> do
-          decl <- genFuncDecl BS.empty rtp (tp:args)
+        Right (Right (ocid,rtp,args,idx)) -> do
+          decl <- genFuncDecl BS.empty rtp (TypeId ocid:args)
           vtable_lbl <- newLabel
           rvtable_lbl <- newLabel
           table_lbl <- newLabel
@@ -590,7 +590,14 @@ compileExpression pos e@(ExprAccess expr name) etp = do
                        ,Assignment rvtable_var (Cast LM_Bitcast vtable_var (LMPointer table_tp))
                        ,Assignment vtable_var (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,0] ])
                        ]
-          return $ ResultMethod (access++extra) func2_var rvar rtp args
+          if cid==ocid
+            then return $ ResultMethod (access++extra) func2_var rvar rtp args
+            else (do
+                     cast_lbl <- newLabel
+                     cast_tp <- toLLVMType (TypeId ocid)
+                     let cast_var = LMLocalVar cast_lbl cast_tp
+                         cast = Assignment cast_var (Cast LM_Bitcast rvar cast_tp)
+                     return $ ResultMethod (cast:access++extra) func2_var cast_var rtp args)
 compileExpression pos e@(ExprArray elems) etp = do
   let el_tp = case etp of
         Nothing -> Nothing
@@ -870,7 +877,7 @@ sizeOf [(arg,tp)] = case tp of
                                                              ])
                     ],TypeInt)
 
-type RecLookupResult = Either (Integer,Integer,Set String) (Either (RType,Integer) (RType,[RType],Integer))
+type RecLookupResult = Either (Integer,Integer,Set String) (Either (RType,Integer) (Integer,RType,[RType],Integer))
 
 lookupMember' :: [Integer] -> String -> Compiler RecLookupResult p
 lookupMember' [] _ = return $ Left (0,0,Set.empty)
@@ -884,7 +891,7 @@ lookupMember' (x:xs) name = do
         Left (noff,noff2,methods2) -> return $ Left (off+noff,off2+noff2,Set.union methods methods2)
         Right rr -> case rr of
           Left (tp,noff) -> return $ Right $ Left (tp,off+noff)
-          Right (rtp,argtp,noff) -> return $ Right $ Right (rtp,argtp,off2+noff)
+          Right (cid,rtp,argtp,noff) -> return $ Right $ Right (cid,rtp,argtp,off2+noff)
 
 lookupMember :: Integer -> String -> Compiler RecLookupResult p
 lookupMember cid name = do
@@ -898,4 +905,4 @@ lookupMember cid name = do
       Nothing -> let nmethods = List.filter (\(fname,_) -> not $ Set.member fname methods) $ Re.classMethods entr
                  in case lookupWithIndex name nmethods of
                    Nothing -> return $ Left (fromIntegral $ length (classVariables entr),fromIntegral $ length nmethods,Set.fromList (fmap fst nmethods))
-                   Just ((rtp,argtp),idx) -> return $ Right $ Right (rtp,argtp,idx)
+                   Just ((rtp,argtp),idx) -> return $ Right $ Right (cid,rtp,argtp,idx)
