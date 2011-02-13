@@ -17,8 +17,11 @@ import Control.Monad.Reader hiding (mapM)
 import Control.Monad.State hiding (mapM)
 import Control.Monad.Error hiding (mapM)
 import Data.Traversable (mapM)
-import Prelude hiding (mapM)
+import Prelude hiding (mapM,concat,foldl,or,foldr)
 import Data.Maybe (catMaybes)
+import Data.Foldable
+import Data.Ord
+import Data.List (sortBy)
 
 import Debug.Trace
 
@@ -26,16 +29,17 @@ compilePike :: Show p => [Definition p] -> Either [CompileError p] LlvmModule
 compilePike defs = case resolve defs of
   Left errs -> Left errs
   Right (st,mp) -> runCompiler mp st $ do
-    ((f1,aliases),f2) <- listen $ do
+    ((f1,aliases,globals),f2) <- listen $ do
       alias <- generateAliases
+      globals <- generateVTables
       funcs <- mapMaybeM (\(Definition mods x _) -> case x of
                              FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just.(\x -> [x])
                              ClassDef name args cdefs -> compileClass (TypeId (ConstId False [name])) name args cdefs >>= return.Just
                              _ -> return Nothing) defs
-      return (concat funcs,alias)
+      return (concat funcs,alias,globals)
     return $  LlvmModule { modComments = []
                          , modAliases = aliases
-                         , modGlobals = []
+                         , modGlobals = globals
                          , modFwdDecls = []
                          , modFuncs = f2++f1
                          }
@@ -135,6 +139,29 @@ generateAliases :: Compiler [LlvmAlias] p
 generateAliases = do
   mp <- ask
   return $ fmap (\cls -> (BS.pack $ Re.className cls,LMStruct $ (LMInt 32):(generateStruct mp cls))) (Map.elems mp)
+
+generateVEntry :: ClassMap -> Integer -> ClassMapEntry -> Integer -> Map String (Integer,(LlvmStatic,LlvmType)) -> Compiler (Integer,Map String (Integer,(LlvmStatic,LlvmType))) p
+generateVEntry cm cid entr c mp = do
+  (nc,nmp) <- foldlM (\(tc,tmp) i -> generateVEntry cm i (cm!i) tc tmp) (c,mp) (Set.toList $ Re.classInherits entr)
+  foldlM (\(tc,tmp) (fname,(rtp,argtp)) -> do
+             let bname = BS.pack $ Re.className entr ++ "__" ++ fname
+             fdecl <- genFuncDecl bname rtp (TypeId cid:argtp)
+             case Map.insertLookupWithKey (\_ (_,nv) (i,ov) -> (i,nv)) fname (tc,(LMStaticPointer $ LMGlobalVar bname (LMPointer $ LMFunction fdecl) Internal Nothing Nothing True,LMPointer $ LMFunction fdecl)) tmp of
+               (Just _,nmp) -> return (tc,nmp)
+               (Nothing,nmp) -> return (tc+1,nmp)
+         ) (nc,nmp) (Map.toList $ Re.classMethods entr)
+
+generateVTables :: Compiler [LMGlobal] p
+generateVTables = do
+  mp <- ask
+  mapM (\(cid,cls) -> do
+           (_,entrs) <- generateVEntry mp cid cls 0 Map.empty
+           let elems = fmap snd (sortBy (comparing fst) (Map.elems entrs))
+               statics = fmap fst elems
+               tps = fmap snd elems
+           return (LMGlobalVar (BS.pack $ "vtable__"++Re.className cls) (LMStruct tps) Internal Nothing Nothing True,Just $ LMStaticStruc statics (LMStruct tps))
+       ) (Map.toList mp)
+             
 
 stackLookupM :: Maybe p -> ConstantIdentifier -> Compiler (StackReference LlvmVar,Integer) p
 stackLookupM pos i = do
