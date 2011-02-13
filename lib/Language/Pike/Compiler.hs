@@ -31,12 +31,12 @@ compilePike defs = case resolve defs of
   Right (st,mp) -> runCompiler mp st $ do
     ((f1,aliases,globals),f2) <- listen $ do
       alias <- generateAliases
-      globals <- generateVTables
+      vtab <- generateVTables
       funcs <- mapMaybeM (\(Definition mods x _) -> case x of
                              FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just.(\x -> [x])
                              ClassDef name args cdefs -> compileClass (TypeId (ConstId False [name])) name args cdefs >>= return.Just
                              _ -> return Nothing) defs
-      return (concat funcs,alias,globals)
+      return (concat funcs,alias++(fmap snd vtab),fmap fst vtab)
     return $  LlvmModule { modComments = []
                          , modAliases = aliases
                          , modGlobals = globals
@@ -138,7 +138,7 @@ generateStruct cm entr = let cur = fmap (\(_,tp) -> toLLVMType' cm tp) (classVar
 generateAliases :: Compiler [LlvmAlias] p
 generateAliases = do
   mp <- ask
-  return $ fmap (\cls -> (BS.pack $ Re.className cls,LMStruct $ (LMInt 32):(generateStruct mp cls))) (Map.elems mp)
+  return $ fmap (\cls -> (BS.pack $ Re.className cls,LMStruct $ (LMPointer $ LMInt 8):(generateStruct mp cls))) (Map.elems mp)
 
 generateVEntry :: ClassMap -> Integer -> ClassMapEntry -> Integer -> Map String (Integer,(LlvmStatic,LlvmType)) -> Compiler (Integer,Map String (Integer,(LlvmStatic,LlvmType))) p
 generateVEntry cm cid entr c mp = do
@@ -151,7 +151,7 @@ generateVEntry cm cid entr c mp = do
                (Nothing,nmp) -> return (tc+1,nmp)
          ) (nc,nmp) (Map.toList $ Re.classMethods entr)
 
-generateVTables :: Compiler [LMGlobal] p
+generateVTables :: Compiler [(LMGlobal,LlvmAlias)] p
 generateVTables = do
   mp <- ask
   mapM (\(cid,cls) -> do
@@ -159,7 +159,10 @@ generateVTables = do
            let elems = fmap snd (sortBy (comparing fst) (Map.elems entrs))
                statics = fmap fst elems
                tps = fmap snd elems
-           return (LMGlobalVar (BS.pack $ "vtable__"++Re.className cls) (LMStruct tps) Internal Nothing Nothing True,Just $ LMStaticStruc statics (LMStruct tps))
+               alias_name = BS.pack $ "VTable__"++Re.className cls
+           return ((LMGlobalVar (BS.pack $ "vtable__"++Re.className cls) (LMAlias alias_name) Internal Nothing Nothing True,Just $ LMStaticStruc statics (LMStruct tps)),
+                   (alias_name,LMStruct tps)
+                  )
        ) (Map.toList mp)
              
 
@@ -508,13 +511,17 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
       let entr = classmap!n
           int_name = BS.pack $ Re.className entr
       lbl <- newLabel
-      lbl_tmp <- newLabel
+      lbl_tmp1 <- newLabel
+      lbl_tmp2 <- newLabel
       let resvar = LMLocalVar lbl (LMPointer (LMAlias int_name))
-          tmpvar = LMLocalVar lbl_tmp (LMPointer (LMInt 32))
-      return $ ResultCalc [Store (LMLitVar (LMIntLit n (LMInt 32))) tmpvar
-                          ,Assignment tmpvar (GetElemPtr True resvar [ LMLitVar (LMIntLit 0 (LMInt 32))
-                                                                     , LMLitVar (LMIntLit 0 (LMInt 32))
-                                                                     ])
+          vname = BS.pack $ "VTable__"++Re.className entr
+          tmpvar1 = LMLocalVar lbl_tmp1 (LMPointer $ LMPointer $ LMInt 8)
+          tmpvar2 = LMLocalVar lbl_tmp2 (LMPointer $ LMPointer $ LMAlias $ vname)
+      return $ ResultCalc [Store (LMGlobalVar (BS.pack $ "vtable__"++Re.className entr) (LMPointer $ LMAlias vname) Internal Nothing Nothing True) tmpvar2
+                          ,Assignment tmpvar2 (Cast LM_Bitcast tmpvar1 (LMPointer $ LMPointer $ LMAlias vname))
+                          ,Assignment tmpvar1 (GetElemPtr True resvar [ LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                      , LMLitVar (LMIntLit 0 (LMInt 32))
+                                                                      ])
                           ,Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))] resvar (TypeId n)
     ResultMethod eStmts fvar this rtp argtp
       | (length argtp) == (length args) -> do
