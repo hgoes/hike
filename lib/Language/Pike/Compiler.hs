@@ -36,20 +36,32 @@ compilePike defs = case resolve defs of
                              FunctionDef name ret args block -> compileFunction name ret args block >>= return.Just.(\x -> [x])
                              ClassDef name args cdefs -> compileClass (TypeId (ConstId False [name])) name args cdefs >>= return.Just
                              _ -> return Nothing) defs
-      return (concat funcs,alias++(fmap snd vtab),fmap fst vtab)
+      (_,_,strs) <- get
+      let global_strs = [ (LMGlobalVar (BS.pack $ "str"++show id) tp Internal Nothing Nothing True,
+                           Just $ LMStaticStruc [LMStaticLit (LMIntLit (fromIntegral len) (LMInt 32))
+                                                ,LMStaticStr (BS.pack $ escapeStr str) (LMArray len (LMInt 8))] tp)
+                        | (str,id) <- Map.toList strs, let len = length str,let tp = LMStruct [LMInt 32,LMArray len (LMInt 8)] ]
+      return (concat funcs,alias++(fmap snd vtab),(fmap fst vtab)++global_strs)
     return $  LlvmModule { modComments = []
                          , modAliases = aliases
                          , modGlobals = globals
-                         , modFwdDecls = [LlvmFunctionDecl { decName = BS.pack "write"
-                                                           , funcLinkage = External
-                                                           , funcCc = CC_Ccc
-                                                           , decReturnType = LMInt 32
-                                                           , decVarargs = FixedArgs
-                                                           , decParams = [(LMInt 32,[]),(LMPointer $ LMInt 8,[]),(LMInt 32,[])]
-                                                           , funcAlign = Nothing
-                                                           }]
+                         , modFwdDecls = [write_decl]
                          , modFuncs = f2++f1
                          }
+
+escapeStr :: String -> String
+escapeStr str = concat $ fmap (\c -> case c of
+                                  '\n' -> "\\0A"
+                                  _ -> [c]) str
+
+write_decl = LlvmFunctionDecl { decName = BS.pack "write"
+                              , funcLinkage = External
+                              , funcCc = CC_Ccc
+                              , decReturnType = LMInt 32
+                              , decVarargs = FixedArgs
+                              , decParams = [(LMInt 32,[]),(LMPointer $ LMInt 8,[]),(LMInt 32,[])]
+                              , funcAlign = Nothing
+                              }
 
 compileClass :: Type -> String -> [(String,Type)] -> [Definition p] -> Compiler [LlvmFunction] p
 compileClass ctype cname _ cdefs = do
@@ -175,7 +187,7 @@ generateVTables = do
 
 stackLookupM :: Maybe p -> ConstantIdentifier -> Compiler (StackReference LlvmVar,Integer) p
 stackLookupM pos i = do
-  (_,st) <- get
+  (_,st,_) <- get
   case stackLookup i st of
     Nothing -> throwError [LookupFailure i pos]
     Just ref -> return ref
@@ -237,9 +249,9 @@ lastBlockTerminated ((LlvmBlock _ stmts):_) = case stmts of
 
 stackPop :: Compiler () p
 stackPop = do
-  (x,st) <- get
+  (x,st,strs) <- get
   case stackPop' st of
-    Just nst -> put (x,nst)
+    Just nst -> put (x,nst,strs)
     Nothing -> throwError [InternalError "Stack corrupt"]
 
 firstLabel :: [LlvmBlock] -> Integer
@@ -296,14 +308,14 @@ compileStatement pos StmtBreak cur = do
       lbl <- newLabel
       return (lbl,[LlvmBlock (LlvmBlockId lbl) []])
   brk <- breakLabelM pos
-  (c,st) <- get
+  (c,st,strs) <- get
   nst <- case stackPopTill (\st -> case st of
                                LocalContext { localType = LoopContext {} } -> True
                                _ -> False) st >>= stackPop' of
            Nothing -> throwError [NothingToBreakTo pos]
            Just b -> return b
   let Just nst2 = addBreak lbl nst st
-  put (c,nst2)
+  put (c,nst2,strs)
   appendStatements [Branch (LMLocalVar brk LMLabel)] ncur
 compileStatement _ (StmtIf expr (Pos ifTrue tpos) mel) cur = do
   lblEnd <- newLabel
@@ -344,11 +356,11 @@ compileWhile cond body cur = do
   lbl_test <- newLabel
   lbl_end <- newLabel
   cls <- ask
-  (_,stack_start) <- get
+  (_,stack_start,_) <- get
   let stack_test = stackUpdateVars (\name tp ref -> case Map.lookup name phis of
                                        Nothing -> Nothing
                                        Just i -> Just (LMLocalVar i (toLLVMType' cls tp))) stack_start
-  modify (\(count,_) -> (count,stack_test))
+  modify (\(count,_,strs) -> (count,stack_test,strs))
   stackPushLoop lbl_start lbl_test lbl_end
   (test_stmts,test_var,_) <- compileExpression' "loop condition" cond (Just TypeBool)
   loop <- compileStatements body []
@@ -357,12 +369,12 @@ compileWhile cond body cur = do
   nloop <- if lastBlockTerminated loop
            then return loop
            else appendStatements [Branch (LMLocalVar lbl_test LMLabel)] loop
-  (_,LocalContext { localType = LoopContext { loopBreakpoints = brks } }) <- get
+  (_,LocalContext { localType = LoopContext { loopBreakpoints = brks } },_) <- get
   stackPop
-  (_,stack_end) <- get
-  modify (\(st,_) -> (st,stackUpdateVars (\name tp ref -> case Map.lookup name phis2 of
-                                                               Nothing -> Nothing
-                                                               Just i -> Just (LMLocalVar i (toLLVMType' cls tp))) stack_test))
+  (_,stack_end,_) <- get
+  modify (\(st,_,strs) -> (st,stackUpdateVars (\name tp ref -> case Map.lookup name phis2 of
+                                                  Nothing -> Nothing
+                                                  Just i -> Just (LMLocalVar i (toLLVMType' cls tp))) stack_test,strs))
   
   res1 <- appendStatements [Branch (LMLocalVar lbl_test LMLabel)] ncur
   return $ [LlvmBlock (LlvmBlockId lbl_end) (createPhis cls phis2 ((lbl_test,stack_test):brks))]++nloop++
@@ -388,21 +400,21 @@ createPhis cls mp st@((_,LocalContext {}):_)
 
 returnTypeM :: Compiler RType p      
 returnTypeM = do
-  (_,st) <- get
+  (_,st,_) <- get
   case returnType st of
     Nothing -> throwError [InternalError "Couldn't figure out return type"]
     Just rtp -> return rtp
 
 breakLabelM :: p -> Compiler Integer p
 breakLabelM pos = do
-  (_,st) <- get
+  (_,st,_) <- get
   case breakLabel st of
     Nothing -> throwError [NothingToBreakTo pos]
     Just brk -> return brk
 
 thisPointerM :: Compiler LlvmVar p
 thisPointerM = do
-  (_,st) <- get
+  (_,st,_) <- get
   case thisPointer st of
     Nothing -> error "Internal error: this pointer couldn't be resolved"
     Just this -> return this
@@ -657,6 +669,16 @@ compileExpression pos e@(ExprIndex expr idx) etp = do
                                                                              ,LMLitVar (LMIntLit 1 (LMInt 32))
                                                                              ,resvar_idx])
                            ]++stmts_idx++stmts_expr) res_var rtp
+compileExpression pos e@(ExprString str) etp = do
+  typeCheck e etp TypeString
+  (n,st,strs) <- get
+  strid <- case Map.lookup str strs of
+    Nothing -> do
+      let sz = fromIntegral $ Map.size strs
+      put (n,st,Map.insert str sz strs)
+      return sz
+    Just i -> return i
+  return $ ResultCalc [] (LMGlobalVar (BS.pack $ "str"++show strid) (LMPointer $ LMStruct [LMInt 32,LMArray (length str) (LMInt 8)]) Internal Nothing Nothing True) TypeString
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
 
@@ -766,10 +788,10 @@ typeCheck expr (Just req) act
   | otherwise = throwError [TypeMismatch expr act req]
               
 stackPushBlock :: Compiler () p
-stackPushBlock = modify (\(n,st) -> (n,LocalContext st Map.empty BlockContext))
+stackPushBlock = modify (\(n,st,strs) -> (n,LocalContext st Map.empty BlockContext,strs))
 
 stackPushLoop :: Integer -> Integer -> Integer -> Compiler () p
-stackPushLoop test start end = modify $ \(n,st) -> (n,LocalContext st Map.empty (LoopContext test start end []))
+stackPushLoop test start end = modify $ \(n,st,strs) -> (n,LocalContext st Map.empty (LoopContext test start end []),strs)
 
 stackPushFunction :: String -> RType -> [(String,RType)] -> Compiler () p
 stackPushFunction name rtype args = do
@@ -777,7 +799,7 @@ stackPushFunction name rtype args = do
                    rtp <- toLLVMType tp
                    return (n,tp,LMNLocalVar (BS.pack n) rtp)
                ) args
-  modify $ \(n,st) -> (n,LocalContext st Map.empty (FunctionContext name rtype vars))
+  modify $ \(n,st,strs) -> (n,LocalContext st Map.empty (FunctionContext name rtype vars),strs)
 
 stackPushMethod :: String -> RType -> [(String,RType)] -> LlvmVar -> Compiler () p
 stackPushMethod name rtype args this = do
@@ -785,14 +807,14 @@ stackPushMethod name rtype args this = do
                    rtp <- toLLVMType tp
                    return (n,tp,LMNLocalVar (BS.pack n) rtp)
                ) args
-  modify $ \(n,st) -> (n,LocalContext st Map.empty (MethodContext name this rtype vars))
+  modify $ \(n,st,strs) -> (n,LocalContext st Map.empty (MethodContext name this rtype vars),strs)
 
 stackPushClass :: Integer -> Compiler () p
 stackPushClass cid = do
   classmap <- ask
   let entr = classmap!cid
   memb <- getInheritedMembers entr
-  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid memb (Map.fromList $ Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st)
+  modify $ \(n,st,strs) -> (n,ClassContext (Re.className entr) cid memb (Map.fromList $ Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st,strs)
 
 getInheritedMembers :: ClassMapEntry -> Compiler [(String,RType)] p
 getInheritedMembers entr = do
@@ -801,14 +823,14 @@ getInheritedMembers entr = do
   return $ concat inh ++ (Re.classVariables entr)
 
 stackAlloc :: String -> RType -> Compiler () p
-stackAlloc name tp = modify $ \(n,st) -> (n,stackAllocVar name tp st)
+stackAlloc name tp = modify $ \(n,st,strs) -> (n,stackAllocVar name tp st,strs)
 
 stackPut :: String -> LlvmVar -> Compiler () p
 stackPut name cont = do
-  (n,st) <- get
+  (n,st,strs) <- get
   case stackUpdateVar name cont st of
     Nothing -> throwError [InternalError $ "Variable "++name++" couldn't be updated"]
-    Just nst -> put (n,nst)
+    Just nst -> put (n,nst,strs)
 
 mbDefault :: RType -> Maybe LlvmVar -> Compiler LlvmVar p
 mbDefault _ (Just var) = return var
@@ -868,7 +890,7 @@ newPhiVars vars = do
 type BuiltIn p = [(LlvmVar,RType)] -> Compiler (LlvmVar,[LlvmStatement],RType) p
 
 builtIns :: Map ConstantIdentifier (BuiltIn p)
-builtIns = Map.fromList [(ConstId False ["sizeof"],sizeOf)]
+builtIns = Map.fromList [(ConstId False ["sizeof"],sizeOf),(ConstId False ["write"],write)]
 
 sizeOf :: BuiltIn p
 sizeOf [(arg,tp)] = case tp of
@@ -883,6 +905,32 @@ sizeOf [(arg,tp)] = case tp of
                                                              , LMLitVar $ LMIntLit 0 (LMInt 32)
                                                              ])
                     ],TypeInt)
+
+write :: BuiltIn p
+write [(arg,tp)] = case tp of
+  TypeString -> do
+    sizeptr_lbl <- newLabel
+    size_lbl <- newLabel
+    ptr_lbl <- newLabel
+    let sizeptr_var = LMLocalVar sizeptr_lbl (LMPointer $ LMInt 32)
+        size_var = LMLocalVar size_lbl (LMInt 32)
+        ptr_var = LMLocalVar ptr_lbl (LMPointer $ LMInt 8)
+    return (undefined,[Expr $ Call StdCall (LMGlobalVar (BS.pack "write") (LMFunction write_decl) External Nothing Nothing True) [LMLitVar (LMIntLit 1 (LMInt 32))
+                                                                                                                                 ,ptr_var
+                                                                                                                                 ,size_var] []
+                                                                                                                       
+                      ,Assignment ptr_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                               , LMLitVar $ LMIntLit 1 (LMInt 32)
+                                                               , LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                               ])
+                      ,Assignment size_var (Load sizeptr_var)
+                      ,Assignment sizeptr_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                                   , LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                                   ])
+                      ],TypeVoid)
+     
+        
+    
 
 type RecLookupResult = Either (Integer,Integer,Set String) (Either (RType,Integer) (Integer,RType,[RType],Integer))
 

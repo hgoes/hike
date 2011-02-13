@@ -133,7 +133,7 @@ instance Show LlvmStatic where
   show (LMComment       s) = "; " ++ BS.unpack s
   show (LMStaticLit   l  ) = show l
   show (LMUninitType    t) = show t ++ " undef"
-  show (LMStaticStr   s t) = show t ++ " c\"" ++ BS.unpack s ++ "\\00\""
+  show (LMStaticStr   s t) = show t ++ " c\"" ++ BS.unpack s ++ "\""
 
   show (LMStaticArray d t)
       = let struc = case d of

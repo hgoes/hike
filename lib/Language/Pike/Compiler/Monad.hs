@@ -13,13 +13,13 @@ import Control.Monad.State
 import Llvm.AbsSyn
 import Llvm.Types
 
-type Compiler a p = ErrorT [CompileError p] (StateT (Integer,Stack LlvmVar) (WriterT [LlvmFunction] (Reader ClassMap))) a
+type Compiler a p = ErrorT [CompileError p] (StateT (Integer,Stack LlvmVar,Map String Integer) (WriterT [LlvmFunction] (Reader ClassMap))) a
 
 newLabel :: Compiler Integer p
 newLabel = do
-  (x,st) <- get
-  put (x+1,st)
+  (x,st,strs) <- get
+  put (x+1,st,strs)
   return x
 
 runCompiler :: ClassMap -> Stack LlvmVar -> Compiler a p -> Either [CompileError p] a
-runCompiler mp st c = fst $ runReader (runWriterT $ evalStateT (runErrorT c) (0,st)) mp
+runCompiler mp st c = fst $ runReader (runWriterT $ evalStateT (runErrorT c) (0,st,Map.empty)) mp
