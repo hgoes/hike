@@ -21,7 +21,7 @@ import Prelude hiding (mapM,concat,foldl,or,foldr)
 import Data.Maybe (catMaybes)
 import Data.Foldable
 import Data.Ord
-import Data.List (sortBy)
+import Data.List as List (sortBy,filter)
 
 import Debug.Trace
 
@@ -149,14 +149,14 @@ generateVEntry cm cid entr c mp = do
              case Map.insertLookupWithKey (\_ (_,nv) (i,ov) -> (i,nv)) fname (tc,(LMStaticPointer $ LMGlobalVar bname (LMPointer $ LMFunction fdecl) Internal Nothing Nothing True,LMPointer $ LMFunction fdecl)) tmp of
                (Just _,nmp) -> return (tc,nmp)
                (Nothing,nmp) -> return (tc+1,nmp)
-         ) (nc,nmp) (Map.toList $ Re.classMethods entr)
+         ) (nc,nmp) (Re.classMethods entr)
 
 generateVTables :: Compiler [(LMGlobal,LlvmAlias)] p
 generateVTables = do
   mp <- ask
   mapM (\(cid,cls) -> do
            (_,entrs) <- generateVEntry mp cid cls 0 Map.empty
-           let elems = fmap snd (sortBy (comparing fst) (Map.elems entrs))
+           let elems = fmap snd (List.sortBy (comparing fst) (Map.elems entrs))
                statics = fmap fst elems
                tps = fmap snd elems
                alias_name = BS.pack $ "VTable__"++Re.className cls
@@ -517,12 +517,23 @@ compileExpression _ e@(ExprCall (Pos expr rpos) args) etp = do
           vname = BS.pack $ "VTable__"++Re.className entr
           tmpvar1 = LMLocalVar lbl_tmp1 (LMPointer $ LMPointer $ LMInt 8)
           tmpvar2 = LMLocalVar lbl_tmp2 (LMPointer $ LMPointer $ LMAlias $ vname)
-      return $ ResultCalc [Store (LMGlobalVar (BS.pack $ "vtable__"++Re.className entr) (LMPointer $ LMAlias vname) Internal Nothing Nothing True) tmpvar2
-                          ,Assignment tmpvar2 (Cast LM_Bitcast tmpvar1 (LMPointer $ LMPointer $ LMAlias vname))
-                          ,Assignment tmpvar1 (GetElemPtr True resvar [ LMLitVar (LMIntLit 0 (LMInt 32))
-                                                                      , LMLitVar (LMIntLit 0 (LMInt 32))
-                                                                      ])
-                          ,Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))] resvar (TypeId n)
+          stmts = [Store (LMGlobalVar (BS.pack $ "vtable__"++Re.className entr) (LMPointer $ LMAlias vname) Internal Nothing Nothing True) tmpvar2
+                  ,Assignment tmpvar2 (Cast LM_Bitcast tmpvar1 (LMPointer $ LMPointer $ LMAlias vname))
+                  ,Assignment tmpvar1 (GetElemPtr True resvar [ LMLitVar (LMIntLit 0 (LMInt 32))
+                                                              , LMLitVar (LMIntLit 0 (LMInt 32))
+                                                              ])
+                  ,Assignment resvar (Malloc (LMAlias int_name) (LMLitVar $ LMIntLit 1 (LMInt 32)))]
+      case etp of
+        Nothing -> return $ ResultCalc stmts resvar (TypeId n)
+        Just (TypeId n') -> if n == n'
+                            then return $ ResultCalc stmts resvar (TypeId n)
+                            else (do
+                                     cast_lbl <- newLabel
+                                     let entr2 = classmap!n'
+                                         ttp = LMPointer (LMAlias $ BS.pack (Re.className entr2))
+                                         cast_var = LMLocalVar cast_lbl ttp
+                                         extra = Assignment cast_var (Cast LM_Bitcast resvar ttp)
+                                     return $ ResultCalc (extra:stmts) cast_var (TypeId n'))
     ResultMethod eStmts fvar this rtp argtp
       | (length argtp) == (length args) -> do
         typeCheck e etp rtp
@@ -560,10 +571,26 @@ compileExpression pos e@(ExprAccess expr name) etp = do
                                ,Assignment tmpvar
                                 (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx+1]])
                                ]++extra) resvar rtp
-        Right (Right (rtp,args)) -> do
-          let fname = (BS.pack $ (Re.className entr) ++ "__" ++ name)
-          decl <- genFuncDecl fname rtp (tp:args)
-          return $ ResultMethod extra (LMGlobalVar fname (LMFunction decl) Internal Nothing Nothing False) rvar rtp args
+        Right (Right (rtp,args,idx)) -> do
+          decl <- genFuncDecl BS.empty rtp (tp:args)
+          vtable_lbl <- newLabel
+          rvtable_lbl <- newLabel
+          table_lbl <- newLabel
+          func_lbl <- newLabel
+          func2_lbl <- newLabel
+          let vtable_var = LMLocalVar vtable_lbl (LMPointer $ LMPointer (LMInt 8))
+              table_tp = LMPointer (LMAlias $ BS.pack $ "VTable__"++Re.className entr)
+              rvtable_var = LMLocalVar rvtable_lbl (LMPointer table_tp)
+              table_var = LMLocalVar table_lbl table_tp
+              func_var = LMLocalVar func_lbl (LMPointer $ LMPointer $ LMFunction decl)
+              func2_var = LMLocalVar func2_lbl (LMPointer $ LMFunction decl)
+              access = [Assignment func2_var (Load func_var)
+                       ,Assignment func_var (GetElemPtr True table_var [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,idx] ])
+                       ,Assignment table_var (Load rvtable_var)
+                       ,Assignment rvtable_var (Cast LM_Bitcast vtable_var (LMPointer table_tp))
+                       ,Assignment vtable_var (GetElemPtr True rvar [ LMLitVar (LMIntLit i (LMInt 32)) | i <- [0,0] ])
+                       ]
+          return $ ResultMethod (access++extra) func2_var rvar rtp args
 compileExpression pos e@(ExprArray elems) etp = do
   let el_tp = case etp of
         Nothing -> Nothing
@@ -751,7 +778,7 @@ stackPushClass cid = do
   classmap <- ask
   let entr = classmap!cid
   memb <- getInheritedMembers entr
-  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid memb (Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st)
+  modify $ \(n,st) -> (n,ClassContext (Re.className entr) cid memb (Map.fromList $ Re.classMethods entr) (Re.classInners entr) (Re.classInherits entr) st)
 
 getInheritedMembers :: ClassMapEntry -> Compiler [(String,RType)] p
 getInheritedMembers entr = do
@@ -843,21 +870,21 @@ sizeOf [(arg,tp)] = case tp of
                                                              ])
                     ],TypeInt)
 
-type RecLookupResult = Either Integer (Either (RType,Integer) (RType,[RType]))
+type RecLookupResult = Either (Integer,Integer,Set String) (Either (RType,Integer) (RType,[RType],Integer))
 
 lookupMember' :: [Integer] -> String -> Compiler RecLookupResult p
-lookupMember' [] _ = return $ Left 0
+lookupMember' [] _ = return $ Left (0,0,Set.empty)
 lookupMember' (x:xs) name = do
   res <- lookupMember x name
   case res of
     Right rr -> return $ Right rr
-    Left off -> do
+    Left (off,off2,methods) -> do
       nres <- lookupMember' xs name
       case nres of
-        Left noff -> return $ Left $ off+noff
+        Left (noff,noff2,methods2) -> return $ Left (off+noff,off2+noff2,Set.union methods methods2)
         Right rr -> case rr of
           Left (tp,noff) -> return $ Right $ Left (tp,off+noff)
-          Right rrr -> return $ Right $ Right rrr
+          Right (rtp,argtp,noff) -> return $ Right $ Right (rtp,argtp,off2+noff)
 
 lookupMember :: Integer -> String -> Compiler RecLookupResult p
 lookupMember cid name = do
@@ -866,8 +893,9 @@ lookupMember cid name = do
   inh <- lookupMember' (Set.toList $ Re.classInherits entr) name
   case inh of
     Right res -> return $ Right res
-    Left off -> case lookupWithIndex name (classVariables entr) of
+    Left (off,off2,methods) -> case lookupWithIndex name (classVariables entr) of
       Just (rtp,idx) -> return $ Right $ Left (rtp,idx+off)
-      Nothing -> case Map.lookup name (Re.classMethods entr) of
-        Nothing -> return $ Left $ fromIntegral $ length (classVariables entr)
-        Just res -> return $ Right $ Right res
+      Nothing -> let nmethods = List.filter (\(fname,_) -> not $ Set.member fname methods) $ Re.classMethods entr
+                 in case lookupWithIndex name nmethods of
+                   Nothing -> return $ Left (fromIntegral $ length (classVariables entr),fromIntegral $ length nmethods,Set.fromList (fmap fst nmethods))
+                   Just ((rtp,argtp),idx) -> return $ Right $ Right (rtp,argtp,idx)
