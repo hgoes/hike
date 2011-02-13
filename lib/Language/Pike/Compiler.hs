@@ -40,7 +40,14 @@ compilePike defs = case resolve defs of
     return $  LlvmModule { modComments = []
                          , modAliases = aliases
                          , modGlobals = globals
-                         , modFwdDecls = []
+                         , modFwdDecls = [LlvmFunctionDecl { decName = BS.pack "write"
+                                                           , funcLinkage = External
+                                                           , funcCc = CC_Ccc
+                                                           , decReturnType = LMInt 32
+                                                           , decVarargs = FixedArgs
+                                                           , decParams = [(LMInt 32,[]),(LMPointer $ LMInt 8,[]),(LMInt 32,[])]
+                                                           , funcAlign = Nothing
+                                                           }]
                          , modFuncs = f2++f1
                          }
 
