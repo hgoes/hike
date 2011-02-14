@@ -215,6 +215,10 @@ translateType (TypeId name) = do
 translateType (TypeArray atp) = do
   ratp <- translateType atp
   return $ TypeArray ratp
+translateType (TypeFunction rtp args) = do
+  rrtp <- translateType rtp
+  rargs <- mapM translateType args
+  return $ TypeFunction rrtp rargs
 translateType x = return $ fmap (const undefined) x
 
 compileStatements :: [Pos Statement p] -> [LlvmBlock] -> Compiler [LlvmBlock] p
@@ -923,19 +927,19 @@ write [(arg,tp)] = case tp of
     let sizeptr_var = LMLocalVar sizeptr_lbl (LMPointer $ LMInt 32)
         size_var = LMLocalVar size_lbl (LMInt 32)
         ptr_var = LMLocalVar ptr_lbl (LMPointer $ LMInt 8)
-    return (undefined,[Expr $ Call StdCall (LMGlobalVar (BS.pack "write") (LMFunction write_decl) External Nothing Nothing True) [LMLitVar (LMIntLit 1 (LMInt 32))
-                                                                                                                                 ,ptr_var
-                                                                                                                                 ,size_var] []
-                                                                                                                       
-                      ,Assignment ptr_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
-                                                               , LMLitVar $ LMIntLit 1 (LMInt 32)
-                                                               , LMLitVar $ LMIntLit 0 (LMInt 32)
-                                                               ])
-                      ,Assignment size_var (Load sizeptr_var)
-                      ,Assignment sizeptr_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
-                                                                   , LMLitVar $ LMIntLit 0 (LMInt 32)
-                                                                   ])
-                      ],TypeVoid)
+    return (LMLitVar (LMUndefLit LMVoid),
+            [Expr $ Call StdCall (LMGlobalVar (BS.pack "write") (LMFunction write_decl) External Nothing Nothing True) [LMLitVar (LMIntLit 1 (LMInt 32))
+                                                                                                                       ,ptr_var
+                                                                                                                       ,size_var] []
+            ,Assignment ptr_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                     , LMLitVar $ LMIntLit 1 (LMInt 32)
+                                                     , LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                     ])
+            ,Assignment size_var (Load sizeptr_var)
+            ,Assignment sizeptr_var (GetElemPtr True arg [ LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                         , LMLitVar $ LMIntLit 0 (LMInt 32)
+                                                         ])
+            ],TypeVoid)
      
         
     

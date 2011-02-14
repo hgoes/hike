@@ -41,6 +41,9 @@ resolveType (TypeId name) = do
           _ -> ([NotAClass name],undefined)
   tell t
   return res
+resolveType (TypeArray etp) = do
+  rtp <- resolveType etp
+  return (TypeArray rtp)
 resolveType x = return $ fmap (const undefined) x -- This is a brutal hack
 
 resolveBody :: [Definition p] -> Resolver ([(String,RType)],[(String,(RType,[RType]))],Map String Integer,Set Integer) p r
