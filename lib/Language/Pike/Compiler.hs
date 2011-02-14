@@ -212,6 +212,9 @@ translateType (TypeId name) = do
   case ref of
     Class n -> return (TypeId n)
     _ -> throwError [NotAClass name]
+translateType (TypeArray atp) = do
+  ratp <- translateType atp
+  return $ TypeArray ratp
 translateType x = return $ fmap (const undefined) x
 
 compileStatements :: [Pos Statement p] -> [LlvmBlock] -> Compiler [LlvmBlock] p
