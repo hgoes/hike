@@ -204,6 +204,7 @@ toLLVMType' _ TypeVoid = LMVoid
 toLLVMType' cls (TypeArray el) = let eltp = toLLVMType' cls el
                                  in LMPointer $ LMStruct [LMInt 32,LMArray 0 eltp]
 toLLVMType' cls (TypeId n) = LMPointer $ LMAlias $ BS.pack $ Re.className $ cls!n
+toLLVMType' cls TypeString = LMPointer $ LMStruct [LMInt 32,LMArray 0 (LMInt 8)]
 
 translateType :: Type -> Compiler RType p
 translateType (TypeId name) = do
@@ -678,7 +679,11 @@ compileExpression pos e@(ExprString str) etp = do
       put (n,st,Map.insert str sz strs)
       return sz
     Just i -> return i
-  return $ ResultCalc [] (LMGlobalVar (BS.pack $ "str"++show strid) (LMPointer $ LMStruct [LMInt 32,LMArray (length str) (LMInt 8)]) Internal Nothing Nothing True) TypeString
+  cast_lbl <- newLabel
+  let orig_var = LMGlobalVar (BS.pack $ "str"++show strid) (LMPointer $ LMStruct [LMInt 32,LMArray (length str) (LMInt 8)]) Internal Nothing Nothing True
+      cast_tp = LMPointer $ LMStruct [LMInt 32,LMArray 0 (LMInt 8)]
+      cast_var = LMLocalVar cast_lbl cast_tp
+  return $ ResultCalc [Assignment cast_var (Cast LM_Bitcast orig_var cast_tp)] cast_var TypeString
 compileExpression _ expr _ = error $ "Couldn't compile expression "++show expr
   
 
